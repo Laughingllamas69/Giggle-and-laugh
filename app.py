@@ -7,14 +7,13 @@ import os
 import json
 import hashlib
 import hmac
+import uuid
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 import random
 import streamlit.components.v1 as components
-from bson import ObjectId
-from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from supabase import create_client
 
 # --- Configuration Constants ---
 
@@ -28,8 +27,9 @@ def config_value(name, default):
         return default
 
 
-MONGO_URI = config_value("MONGODB_URI", "mongodb://localhost:27017")
-MONGO_DB_NAME = config_value("MONGO_DB_NAME", "giggle_laugh")
+SUPABASE_URL = config_value("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = config_value("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_MEME_BUCKET = config_value("SUPABASE_MEME_BUCKET", "community-memes")
 APP_ADMIN_PASSWORD = config_value("APP_ADMIN_PASSWORD", "")
 APP_TITLE = "Giggle and Laugh 😂"
 APP_SUBTITLE = "Your Personal Hub for Fun, Games, and Good Vibes"
@@ -634,143 +634,180 @@ renderer.setAnimationLoop(animate);
 
 # --- Database Functions ---
 
-try:
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
-    mongo_client.admin.command("ping")
-    mongo_db = mongo_client[MONGO_DB_NAME]
-    MONGO_AVAILABLE = True
-except Exception:
-    mongo_client = None
-    mongo_db = None
-    MONGO_AVAILABLE = False
+supabase_client = None
+SUPABASE_AVAILABLE = False
+SUPABASE_ERROR = None
 
-
-def init_db():
-    if mongo_db is None:
-        return
-    mongo_db.mood_logs.create_index([("user_id", 1), ("timestamp", 1)])
-    mongo_db.memes.create_index([("created_at", -1)])
-    mongo_db.jokes.create_index([("created_at", -1)])
+if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        for table_name in ("mood_logs", "memes", "jokes"):
+            supabase_client.table(table_name).select("id").limit(1).execute()
+        SUPABASE_AVAILABLE = True
+    except Exception as error:
+        supabase_client = None
+        SUPABASE_ERROR = str(error).replace(SUPABASE_SERVICE_ROLE_KEY, "[redacted]")
 
 
 def save_community_meme(meme):
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return False
+
+    image_path = f"{uuid.uuid4().hex}.{meme['image_extension']}"
     try:
-        mongo_db.memes.insert_one({**meme, "created_at": datetime.now().isoformat(timespec="seconds")})
+        supabase_client.storage.from_(SUPABASE_MEME_BUCKET).upload(
+            image_path,
+            meme["image"],
+            file_options={"content-type": meme["image_type"], "upsert": "false"},
+        )
+        supabase_client.table("memes").insert(
+            {
+                "title": meme["title"],
+                "description": meme["desc"],
+                "image_path": image_path,
+                "user_id": meme["user_id"],
+            }
+        ).execute()
         return True
-    except PyMongoError:
+    except Exception:
+        try:
+            supabase_client.storage.from_(SUPABASE_MEME_BUCKET).remove([image_path])
+        except Exception:
+            pass
         return False
 
 
 def get_community_memes():
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return None
     try:
-        return list(
-            mongo_db.memes.find({}, {"title": 1, "desc": 1, "image": 1, "user_id": 1, "created_at": 1})
-            .sort("created_at", -1)
-        )
-    except PyMongoError:
+        response = supabase_client.table("memes").select("*").order("created_at", desc=True).execute()
+        memes = []
+        for record in response.data:
+            image_url = supabase_client.storage.from_(SUPABASE_MEME_BUCKET).get_public_url(record["image_path"])
+            memes.append(
+                {
+                    "_id": record["id"],
+                    "title": record["title"],
+                    "desc": record["description"],
+                    "image": image_url,
+                    "image_path": record["image_path"],
+                    "user_id": record["user_id"],
+                    "created_at": record["created_at"],
+                }
+            )
+        return memes
+    except Exception:
         return None
 
 
 def save_community_joke(joke):
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return False
     try:
-        mongo_db.jokes.insert_one({**joke, "created_at": datetime.now().isoformat(timespec="seconds")})
+        supabase_client.table("jokes").insert(
+            {"category": joke["category"], "text": joke["text"], "user_id": joke["user_id"]}
+        ).execute()
         return True
-    except PyMongoError:
+    except Exception:
         return False
 
 
 def get_community_jokes():
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return None
     try:
-        return list(
-            mongo_db.jokes.find({}, {"category": 1, "text": 1, "user_id": 1, "created_at": 1})
-            .sort("created_at", -1)
-        )
-    except PyMongoError:
+        response = supabase_client.table("jokes").select("*").order("created_at", desc=True).execute()
+        return [
+            {
+                "_id": record["id"],
+                "category": record["category"],
+                "text": record["text"],
+                "user_id": record["user_id"],
+                "created_at": record["created_at"],
+            }
+            for record in response.data
+        ]
+    except Exception:
         return None
 
 
 def update_community_meme(post_id, title, description):
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return False
     try:
-        result = mongo_db.memes.update_one(
-            {"_id": ObjectId(post_id)},
-            {"$set": {"title": title.strip(), "desc": description.strip()}},
-        )
-        return result.matched_count == 1
-    except (PyMongoError, ValueError):
+        response = supabase_client.table("memes").update(
+            {"title": title.strip(), "description": description.strip()}
+        ).eq("id", post_id).select("id").execute()
+        return bool(response.data)
+    except Exception:
         return False
 
 
 def delete_community_meme(post_id):
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return False
     try:
-        return mongo_db.memes.delete_one({"_id": ObjectId(post_id)}).deleted_count == 1
-    except (PyMongoError, ValueError):
+        record = supabase_client.table("memes").select("image_path").eq("id", post_id).single().execute().data
+        response = supabase_client.table("memes").delete().eq("id", post_id).select("id").execute()
+        if not response.data:
+            return False
+        supabase_client.storage.from_(SUPABASE_MEME_BUCKET).remove([record["image_path"]])
+        return True
+    except Exception:
         return False
 
 
 def update_community_joke(post_id, category, text):
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return False
     try:
-        result = mongo_db.jokes.update_one(
-            {"_id": ObjectId(post_id)},
-            {"$set": {"category": category, "text": text.strip()}},
-        )
-        return result.matched_count == 1
-    except (PyMongoError, ValueError):
+        response = supabase_client.table("jokes").update(
+            {"category": category, "text": text.strip()}
+        ).eq("id", post_id).select("id").execute()
+        return bool(response.data)
+    except Exception:
         return False
 
 
 def delete_community_joke(post_id):
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return False
     try:
-        return mongo_db.jokes.delete_one({"_id": ObjectId(post_id)}).deleted_count == 1
-    except (PyMongoError, ValueError):
+        response = supabase_client.table("jokes").delete().eq("id", post_id).select("id").execute()
+        return bool(response.data)
+    except Exception:
         return False
 
 
 def save_mood_log(user_id, mood_score, recommendation):
-    if mongo_db is None:
-        return
-    mongo_db.mood_logs.insert_one(
-        {
-            "user_id": user_id,
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "mood_score": mood_score,
-            "recommendation": recommendation,
-        }
-    )
+    if not SUPABASE_AVAILABLE:
+        return False
+    try:
+        supabase_client.table("mood_logs").insert(
+            {
+                "user_id": user_id,
+                "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "mood_score": mood_score,
+                "recommendation": recommendation,
+            }
+        ).execute()
+        return True
+    except Exception:
+        return False
 
 
 def get_user_history(user_id):
-    if mongo_db is None:
+    if not SUPABASE_AVAILABLE:
         return pd.DataFrame(columns=["id", "user_id", "timestamp", "mood_score", "recommendation"])
 
-    documents = list(mongo_db.mood_logs.find({"user_id": user_id}).sort("timestamp", 1))
-    rows = []
-    for doc in documents:
-        rows.append(
-            {
-                "id": str(doc.get("_id")),
-                "user_id": doc.get("user_id"),
-                "timestamp": doc.get("timestamp"),
-                "mood_score": doc.get("mood_score"),
-                "recommendation": doc.get("recommendation"),
-            }
-        )
-    return pd.DataFrame(rows)
+    try:
+        response = supabase_client.table("mood_logs").select(
+            "id,user_id,timestamp,mood_score,recommendation"
+        ).eq("user_id", user_id).order("timestamp").execute()
+        return pd.DataFrame(response.data)
+    except Exception:
+        return pd.DataFrame(columns=["id", "user_id", "timestamp", "mood_score", "recommendation"])
 
 def hash_pseudonym(raw_id: str) -> str:
     raw_id = raw_id.strip().lower()
@@ -859,9 +896,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-init_db()
-if not MONGO_AVAILABLE:
-    st.warning("MongoDB is not connected. Mood history, memes, and jokes will only be saved for this session.")
+if not SUPABASE_AVAILABLE:
+    st.warning("Supabase is not connected. Mood history, memes, and jokes will only be saved for this session.")
+    if SUPABASE_ERROR:
+        st.caption("Check the Supabase secrets and run the SQL setup script from the project.")
 inject_css()
 
 # Session State Initialization
@@ -997,8 +1035,10 @@ with tab_vibe:
             st.success(rec_text)
             
         # Save to DB
-        save_mood_log(st.session_state.user_id, score, rec_text)
-        st.toast("Vibe logged successfully!")
+        if save_mood_log(st.session_state.user_id, score, rec_text):
+            st.toast("Vibe logged successfully!")
+        else:
+            st.warning("Supabase could not save this vibe. Check your connection and Supabase setup.")
 
     st.divider()
     st.markdown("#### Your Recent Vibes")
@@ -1093,6 +1133,12 @@ with tab_memes:
                         "title": meme_title.strip(),
                         "desc": meme_caption.strip(),
                         "image": meme_image.getvalue(),
+                        "image_type": meme_image.type,
+                        "image_extension": {
+                            "image/png": "png",
+                            "image/jpeg": "jpg",
+                            "image/webp": "webp",
+                        }.get(meme_image.type, "png"),
                         "user_id": st.session_state.user_id,
                     }
                     if save_community_meme(meme):
@@ -1100,7 +1146,7 @@ with tab_memes:
                         st.rerun()
                     else:
                         st.session_state.community_memes.append(meme)
-                        st.warning("MongoDB could not save this post. It is only visible in your session, not to everyone.")
+                        st.warning("Supabase could not save this post. It is only visible in your session, not to everyone.")
 
         stored_memes = get_community_memes()
         if stored_memes is None:
@@ -1188,7 +1234,7 @@ with tab_jokes:
                         st.rerun()
                     else:
                         st.session_state.community_jokes.append(joke)
-                        st.warning("MongoDB could not save this joke. It is only visible in your session, not to everyone.")
+                        st.warning("Supabase could not save this joke. It is only visible in your session, not to everyone.")
                 else:
                     st.warning("Type a joke first. Even a terrible one counts.")
 

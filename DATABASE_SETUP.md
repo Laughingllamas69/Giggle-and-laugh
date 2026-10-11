@@ -1,42 +1,30 @@
-# MongoDB Atlas Setup
+# Supabase Setup
 
-The app can use MongoDB Atlas for mood history, community memes, and community jokes. When no database is configured, it continues to run, but new contributions only last for the current session.
+The app uses Supabase Postgres for mood history, community memes, and community jokes. Meme image files are stored in Supabase Storage, while their titles, captions, and storage paths are stored in Postgres. If Supabase is not configured, the app still starts, but posts only last for that browser session.
 
-## Create an Atlas database
+## Create the Supabase project
 
-1. Create a MongoDB Atlas account and a free shared cluster.
-2. In **Database Access**, create a database user with read/write access to the `giggle_laugh` database. Use a unique, strong password.
-3. In **Network Access**, allow your current IP for local testing. For a hosted app, use the hosting provider's current networking guidance; avoid broad network access unless you understand the exposure and have restricted the database user appropriately.
-4. Select **Connect** then **Drivers**, choose Python, and copy the connection string. Replace the username, password, and cluster host. URL-encode special characters in the password.
+1. Create a project at [Supabase](https://supabase.com/) and wait for it to finish provisioning.
+2. Open **SQL Editor**, paste the contents of [`supabase_schema.sql`](supabase_schema.sql), and run it. This creates the tables and the public-read `community-memes` bucket.
+3. Open **Project Settings > API**. Copy the Project URL and the `service_role` secret key. Keep the service-role key private; it bypasses row-level security and must only be used by the Streamlit server.
 
-## Run locally
+## Configure Streamlit Community Cloud
 
-Create `.streamlit/secrets.toml` using `.streamlit/secrets.toml.example` as a template, then put your real Atlas URI in it. That real secrets file is excluded by `.gitignore`; do not commit it or share the URI.
-
-Set `APP_ADMIN_PASSWORD` in the same file to a long, unique password that only you know. Open the app's sidebar, expand **Owner controls**, and enter that password to unlock the community content manager. From there you can edit or delete uploaded memes and jokes for everyone. The password is never the public nickname used to enter the app.
-
-Restart Streamlit after changing `secrets.toml` so the app loads the new password.
-
-Start the app with:
-
-```sh
-streamlit run app.py
-```
-
-When the app connects, the MongoDB warning disappears. Collections and indexes are created automatically for mood logs, memes, and jokes.
-
-## Deploy with Streamlit Community Cloud
-
-In the deployed app's **Settings > Secrets**, add the same TOML values:
+Open the deployed app's **Settings > Secrets** and add:
 
 ```toml
-MONGODB_URI = "mongodb+srv://..."
-MONGO_DB_NAME = "giggle_laugh"
-APP_ADMIN_PASSWORD = "choose-a-long-unique-password"
+SUPABASE_URL = "https://<project-ref>.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "<service-role-key>"
+SUPABASE_MEME_BUCKET = "community-memes"
+APP_ADMIN_PASSWORD = "<choose-a-long-unique-password>"
 ```
 
-Keep the URI and owner password in the hosting provider's secret settings, never in source code. Atlas network access must also allow the deployed app's outbound connections.
+Replace the first two placeholders with the values from Supabase. Set a long, unique owner password. Save the secrets, then reboot the Streamlit app. Never put the service-role key in GitHub, browser JavaScript, or a public message.
 
-On a shared deployment, anyone who can access the sidebar can see the owner login, but only someone with `APP_ADMIN_PASSWORD` can edit or delete community uploads. Use a strong password and rotate it if it is exposed.
+The service-role key is used only in the server-side Python app. The schema enables RLS on the tables and does not grant table access to anonymous users. The Storage bucket is public-read so uploaded community meme images can be displayed to visitors; writes and deletes are performed server-side with the service-role key and owner controls.
 
-Meme image files are stored in MongoDB with a 5 MB upload limit. For a larger public gallery, move image files to object storage and keep only their URLs and captions in MongoDB.
+## Owner controls
+
+Open the app sidebar, expand **Owner controls**, and enter `APP_ADMIN_PASSWORD` to edit or delete uploaded memes and jokes for everyone. This password is separate from the public nickname login.
+
+Meme uploads are limited to 5 MB and PNG, JPG, or WebP. Existing MongoDB data is not migrated automatically; this integration starts using the Supabase tables after setup.
