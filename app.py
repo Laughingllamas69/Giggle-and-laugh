@@ -7,15 +7,28 @@ import os
 import json
 import base64
 import mimetypes
-import hashlib
 import hmac
+import html
 import uuid
 from datetime import datetime
+from datetime import date, timedelta
+from knowledge_content import INDIA_GK_QUESTIONS, RIDDLES
 import pandas as pd
 import streamlit as st
 import random
-import streamlit.components.v1 as components
 from supabase import create_client
+from app_helpers import (
+    build_rps_leaderboard,
+    build_mood_garden,
+    calculate_activity_streak,
+    count_recent_distress_checkins,
+    get_profile_badges,
+    get_rps_result,
+    hash_pseudonym,
+    summarize_mood_scores,
+    summarize_mood_pulse,
+    validate_chat_attachment,
+)
 
 # --- Configuration Constants ---
 
@@ -32,9 +45,12 @@ def config_value(name, default):
 SUPABASE_URL = config_value("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = config_value("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_MEME_BUCKET = config_value("SUPABASE_MEME_BUCKET", "community-memes")
+SUPABASE_CHAT_BUCKET = config_value("SUPABASE_CHAT_BUCKET", "community-chat")
 APP_ADMIN_PASSWORD = config_value("APP_ADMIN_PASSWORD", "")
-APP_TITLE = "Giggle and Laugh 😂"
-APP_SUBTITLE = "Your Personal Hub for Fun, Games, and Good Vibes"
+COUNSELING_CENTER_NAME = config_value("COUNSELING_CENTER_NAME", "")
+COUNSELING_CENTER_PHONE = config_value("COUNSELING_CENTER_PHONE", "")
+APP_TITLE = "Giggle and Laugh"
+APP_SUBTITLE = "A lighter place to take a break."
 
 # --- Jokes Database ---
 JOKES_LIST = [
@@ -54,12 +70,54 @@ JOKES_LIST = [
 
 # --- Meme Data ---
 MEME_TEMPLATES = [
-    {"title": "Distracted Boyfriend", "desc": "Me looking at dessert when I said I'm on a diet.", "emoji": "👀🍰"},
-    {"title": "Drake Hotline Bling", "desc": "Working Hard: ❌ | Taking a Nap: ✅", "emoji": "🙅‍♂️😴"},
-    {"title": "Two Buttons", "desc": "Sleep Early vs. Watch One More Episode", "emoji": "😵💤📺"},
-    {"title": "Expanding Brain", "desc": "Coffee → Espresso → Caffeine IV Drip", "emoji": "🧠☕⚡"},
-    {"title": "This is Fine", "desc": "Me when the deadline is tomorrow but today is fine.", "emoji": "🔥🐶☕"},
-    {"title": "Change My Mind", "desc": "Pineapple belongs on pizza. Change my mind.", "emoji": "🍕🤔"},
+    {
+        "title": "Distracted Boyfriend",
+        "desc": "Me looking at dessert when I said I'm on a diet.",
+        "emoji": "👀🍰",
+        "mood_label": "Pulled in two directions",
+        "mood_score": 2,
+        "emotion": "Torn between competing priorities.",
+    },
+    {
+        "title": "Drake Hotline Bling",
+        "desc": "Working Hard: ❌ | Taking a Nap: ✅",
+        "emoji": "🙅‍♂️😴",
+        "mood_label": "Choosing rest",
+        "mood_score": 1,
+        "emotion": "Low energy and ready to take a break.",
+    },
+    {
+        "title": "Two Buttons",
+        "desc": "Sleep Early vs. Watch One More Episode",
+        "emoji": "😵💤📺",
+        "mood_label": "Decision overload",
+        "mood_score": 1,
+        "emotion": "Overwhelmed by too many small decisions.",
+    },
+    {
+        "title": "Expanding Brain",
+        "desc": "Coffee → Espresso → Caffeine IV Drip",
+        "emoji": "🧠☕⚡",
+        "mood_label": "Caffeine-fueled",
+        "mood_score": 3,
+        "emotion": "Running on determination and a little caffeine.",
+    },
+    {
+        "title": "This is Fine",
+        "desc": "Me when the deadline is tomorrow but today is fine.",
+        "emoji": "🔥🐶☕",
+        "mood_label": "Overwhelmed but coping",
+        "mood_score": 1,
+        "emotion": "Overwhelmed, but finding a way to cope.",
+    },
+    {
+        "title": "Change My Mind",
+        "desc": "Pineapple belongs on pizza. Change my mind.",
+        "emoji": "🍕🤔",
+        "mood_label": "Playfully confident",
+        "mood_score": 4,
+        "emotion": "Feeling upbeat and ready to share an opinion.",
+    },
 ]
 
 
@@ -409,7 +467,7 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.m
             roadSegments[index].group.position.z = -index * segmentLength;
             roadSegments[index].gapHit = false; roadSegments[index].hazardHit = false; randomizeSegment(roadSegments[index], 0, index < 2);
         }
-        hero.position.set(laneX[lane], -3.2, 3.5); title.innerHTML = 'SKYWAY<br><em>SPRINT</em>';
+        hero.position.set(laneX[lane], -3.2, 3.0); title.innerHTML = 'SKYWAY<br><em>SPRINT</em>';
         copy.textContent = 'Leap the gaps, dodge the clockwork hazards, and see how far the sky road goes.';
         startButton.innerHTML = 'START RUN <span>↗</span>'; overlay.classList.add('hidden'); running = true; paused = false; lastFrame = 0; updateLabels();
         raf = requestAnimationFrame(tick);
@@ -1489,8 +1547,27 @@ SUPABASE_ERROR = None
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
     try:
         supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        for table_name in ("mood_logs", "memes", "jokes"):
-            supabase_client.table(table_name).select("id").limit(1).execute()
+        required_columns = {
+            "mood_logs": "id,user_id,timestamp,mood_score,mood_label,recommendation",
+            "memes": "id,title,description,image_path,user_id,is_hidden",
+            "jokes": "id,category,text,user_id,is_hidden",
+            "content_reports": "id,target_type,target_id,reporter_id,reason,resolved",
+            "game_scores": "id,user_id,game_name,score,created_at",
+            "profiles": "user_id,display_name,avatar_color,bio",
+            "activity_events": "id,user_id,activity_type,activity_date,points",
+            "comments": "id,target_type,target_id,user_id,body",
+            "reactions": "id,target_type,target_id,user_id,reaction",
+            "chat_messages": (
+                "id,user_id,display_name,body,created_at,is_hidden,"
+                "attachment_path,attachment_name,attachment_type,attachment_size"
+            ),
+        }
+        for table_name, columns in required_columns.items():
+            supabase_client.table(table_name).select(columns).limit(1).execute()
+        supabase_client.rpc(
+            "get_game_leaderboard",
+            {"p_game_name": "rock-paper-scissors", "p_since": None},
+        ).execute()
         SUPABASE_AVAILABLE = True
     except Exception as error:
         supabase_client = None
@@ -1498,7 +1575,7 @@ if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
 
 
 def save_community_meme(meme):
-    if not SUPABASE_AVAILABLE:
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
         return False
 
     image_path = f"{uuid.uuid4().hex}.{meme['image_extension']}"
@@ -1525,11 +1602,16 @@ def save_community_meme(meme):
         return False
 
 
-def get_community_memes():
+def get_community_memes(include_hidden=False):
+    if st.session_state.get("demo_mode"):
+        return []
     if not SUPABASE_AVAILABLE:
         return None
     try:
-        response = supabase_client.table("memes").select("*").order("created_at", desc=True).execute()
+        query = supabase_client.table("memes").select("*").order("created_at", desc=True)
+        if not include_hidden:
+            query = query.eq("is_hidden", False)
+        response = query.execute()
         memes = []
         for record in response.data:
             image_url = supabase_client.storage.from_(SUPABASE_MEME_BUCKET).get_public_url(record["image_path"])
@@ -1542,6 +1624,7 @@ def get_community_memes():
                     "image_path": record["image_path"],
                     "user_id": record["user_id"],
                     "created_at": record["created_at"],
+                    "is_hidden": record["is_hidden"],
                 }
             )
         return memes
@@ -1550,7 +1633,7 @@ def get_community_memes():
 
 
 def save_community_joke(joke):
-    if not SUPABASE_AVAILABLE:
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
         return False
     try:
         supabase_client.table("jokes").insert(
@@ -1561,11 +1644,16 @@ def save_community_joke(joke):
         return False
 
 
-def get_community_jokes():
+def get_community_jokes(include_hidden=False):
+    if st.session_state.get("demo_mode"):
+        return []
     if not SUPABASE_AVAILABLE:
         return None
     try:
-        response = supabase_client.table("jokes").select("*").order("created_at", desc=True).execute()
+        query = supabase_client.table("jokes").select("*").order("created_at", desc=True)
+        if not include_hidden:
+            query = query.eq("is_hidden", False)
+        response = query.execute()
         return [
             {
                 "_id": record["id"],
@@ -1573,6 +1661,7 @@ def get_community_jokes():
                 "text": record["text"],
                 "user_id": record["user_id"],
                 "created_at": record["created_at"],
+                "is_hidden": record["is_hidden"],
             }
             for record in response.data
         ]
@@ -1628,15 +1717,755 @@ def delete_community_joke(post_id):
         return False
 
 
-def save_mood_log(user_id, mood_score, recommendation):
+def submit_content_report(target_type, target_id, reporter_id, reason):
     if not SUPABASE_AVAILABLE:
         return False
+    try:
+        supabase_client.table("content_reports").insert(
+            {
+                "target_type": target_type,
+                "target_id": target_id,
+                "reporter_id": reporter_id,
+                "reason": reason,
+            }
+        ).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_open_content_reports():
+    if not SUPABASE_AVAILABLE:
+        return None
+    try:
+        response = supabase_client.table("content_reports").select(
+            "id,target_type,target_id,reporter_id,reason,created_at"
+        ).eq("resolved", False).order("created_at", desc=True).execute()
+        return response.data
+    except Exception:
+        return None
+
+
+def resolve_content_report(report_id, target_type=None, target_id=None, hide_content=False):
+    if not SUPABASE_AVAILABLE:
+        return False
+    try:
+        if hide_content:
+            table_name = {"meme": "memes", "joke": "jokes"}.get(target_type)
+            if table_name is None:
+                return False
+            hidden = supabase_client.table(table_name).update(
+                {"is_hidden": True}
+            ).eq("id", target_id).select("id").execute()
+            if not hidden.data:
+                return False
+        response = supabase_client.table("content_reports").update(
+            {"resolved": True}
+        ).eq("id", report_id).select("id").execute()
+        return bool(response.data)
+    except Exception:
+        return False
+
+
+def set_content_visibility(target_type, target_id, is_hidden):
+    if not SUPABASE_AVAILABLE:
+        return False
+    table_name = {"meme": "memes", "joke": "jokes"}.get(target_type)
+    if table_name is None:
+        return False
+    try:
+        response = supabase_client.table(table_name).update(
+            {"is_hidden": is_hidden}
+        ).eq("id", target_id).select("id").execute()
+        return bool(response.data)
+    except Exception:
+        return False
+
+
+def record_game_score(user_id, game_name, score):
+    created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        st.session_state.demo_game_scores.append(
+            {"user_id": user_id, "game_name": game_name, "score": score, "created_at": created_at}
+        )
+        return True
+    try:
+        supabase_client.table("game_scores").insert(
+            {"user_id": user_id, "game_name": game_name, "score": score, "created_at": created_at}
+        ).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_game_leaderboard(game_name, period="All-time"):
+    cutoff = None
+    if period == "Last 7 days":
+        cutoff = (datetime.now().astimezone() - timedelta(days=7)).isoformat(timespec="seconds")
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        score_rows = [
+            item for item in st.session_state.demo_game_scores
+            if item["game_name"] == game_name
+            and (cutoff is None or item.get("created_at", "") >= cutoff)
+        ]
+        if game_name == "rock-paper-scissors":
+            leaderboard = build_rps_leaderboard(score_rows)
+            return pd.DataFrame(leaderboard) if leaderboard else pd.DataFrame(
+                columns=["user_id", "wins", "rounds"]
+            )
+        if score_rows:
+            return (
+                pd.DataFrame(score_rows)
+                .groupby("user_id", as_index=False)["score"]
+                .max()
+                .sort_values(["score", "user_id"], ascending=[False, True])
+                .head(10)
+                .reset_index(drop=True)
+            )
+        return pd.DataFrame(columns=["user_id", "score"])
+    try:
+        response = supabase_client.rpc(
+            "get_game_leaderboard",
+            {"p_game_name": game_name, "p_since": cutoff},
+        ).execute()
+        if not response.data:
+            if game_name == "rock-paper-scissors":
+                return pd.DataFrame(columns=["user_id", "wins", "rounds"])
+            return pd.DataFrame(columns=["user_id", "score"])
+        score_label = "wins" if game_name == "rock-paper-scissors" else "score"
+        leaderboard = pd.DataFrame(response.data).rename(columns={"metric": score_label})
+        if game_name != "rock-paper-scissors":
+            leaderboard = leaderboard.drop(columns=["rounds"])
+        return leaderboard
+    except Exception:
+        return None
+
+
+def save_profile(user_id, display_name, avatar_color, bio):
+    profile = {
+        "user_id": user_id,
+        "display_name": display_name.strip()[:30],
+        "avatar_color": avatar_color,
+        "bio": bio.strip()[:160],
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        st.session_state.demo_profiles[user_id] = profile
+        return True
+    try:
+        supabase_client.table("profiles").upsert(profile, on_conflict="user_id").execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_profile(user_id):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        return st.session_state.demo_profiles.get(
+            user_id,
+            {"display_name": st.session_state.get("profile_display_name", "Guest"), "avatar_color": "#24473f", "bio": ""},
+        )
+    if not SUPABASE_AVAILABLE:
+        return None
+    try:
+        response = supabase_client.table("profiles").select(
+            "display_name,avatar_color,bio"
+        ).eq("user_id", user_id).maybe_single().execute()
+        return response.data or {
+            "display_name": st.session_state.get("profile_display_name", "Guest"),
+            "avatar_color": "#24473f",
+            "bio": "",
+        }
+    except Exception:
+        return None
+
+
+def record_activity(user_id, activity_type, points=1):
+    activity_date = date.today().isoformat()
+    event = {
+        "user_id": user_id,
+        "activity_type": activity_type,
+        "activity_date": activity_date,
+        "points": points,
+    }
+    try:
+        if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+            local_events = st.session_state.demo_activity_events
+            if not any(
+                item["user_id"] == user_id
+                and item["activity_type"] == activity_type
+                and item["activity_date"] == activity_date
+                for item in local_events
+            ):
+                local_events.append(event)
+        else:
+            supabase_client.table("activity_events").upsert(
+                event, on_conflict="user_id,activity_type,activity_date", ignore_duplicates=True
+            ).execute()
+        if activity_type != "daily_reward":
+            daily_events = get_user_activity(user_id)
+            if daily_events is not None and not any(
+                item["activity_type"] == "daily_reward"
+                and item["activity_date"] == activity_date
+                for item in daily_events
+            ):
+                record_activity(user_id, "daily_reward", 10)
+        return True
+    except Exception:
+        return False
+
+
+def get_user_activity(user_id):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        return [
+            item for item in st.session_state.demo_activity_events if item["user_id"] == user_id
+        ]
+    try:
+        response = supabase_client.table("activity_events").select(
+            "activity_type,activity_date,points"
+        ).eq("user_id", user_id).order("activity_date", desc=True).limit(500).execute()
+        return response.data
+    except Exception:
+        return None
+
+
+def get_platform_analytics():
+    demo = st.session_state.get("demo_mode")
+    if not SUPABASE_AVAILABLE or demo:
+        if demo:
+            demo_moods = [1, 2, 2, 3, 3, 3, 4, 4, 4, 4, 2, 3, 4, 1, 3, 4]
+            mood_records = [
+                {
+                    "timestamp": (date.today() - timedelta(days=len(demo_moods) - index - 1)).isoformat(),
+                    "mood_score": score,
+                }
+                for index, score in enumerate(demo_moods)
+            ]
+            activity_records = [
+                {
+                    "user_id": f"FUN-{player:02d}",
+                    "activity_date": (date.today() - timedelta(days=day_offset)).isoformat(),
+                }
+                for day_offset in range(14)
+                for player in range(8 + day_offset % 6)
+            ]
+            return {
+                "moods": demo_moods,
+                "mood_records": mood_records,
+                "activity_records": activity_records,
+                "game_scores": [
+                    {"game_name": "rock-paper-scissors", "score": 1},
+                    {"game_name": "rock-paper-scissors", "score": 0},
+                    {"game_name": "clicker", "score": 72},
+                    {"game_name": "flap-dash", "score": 12},
+                    {"game_name": "temple-dash", "score": 340},
+                    {"game_name": "grand-prix", "score": 840},
+                    {"game_name": "skyway-sprint", "score": 510},
+                ],
+                "meme_count": 18,
+                "joke_count": 32,
+                "active_today": 8,
+                "top_posts": [
+                    {"Post": "Monday loading...", "Type": "Meme", "Reactions": 24},
+                    {"Post": "The cache joke", "Type": "Joke", "Reactions": 18},
+                    {"Post": "Two buttons: sleep vs. one more episode", "Type": "Meme", "Reactions": 15},
+                ],
+            }
+        return None
+    try:
+        moods = supabase_client.table("mood_logs").select(
+            "timestamp,mood_score"
+        ).order("timestamp", desc=True).limit(1000).execute().data
+        scores = supabase_client.table("game_scores").select(
+            "user_id,game_name,score"
+        ).order("created_at", desc=True).limit(1000).execute().data
+        memes = supabase_client.table("memes").select(
+            "id,title", count="exact"
+        ).eq("is_hidden", False).limit(1000).execute()
+        jokes = supabase_client.table("jokes").select(
+            "id,text", count="exact"
+        ).eq("is_hidden", False).limit(1000).execute()
+        activity_records = supabase_client.table("activity_events").select(
+            "user_id,activity_date"
+        ).gte(
+            "activity_date", (date.today() - timedelta(days=29)).isoformat()
+        ).limit(5000).execute().data
+        reactions = supabase_client.table("reactions").select(
+            "target_type,target_id"
+        ).limit(5000).execute().data
+        reaction_counts = {}
+        for reaction in reactions:
+            post_key = (reaction["target_type"], reaction["target_id"])
+            reaction_counts[post_key] = reaction_counts.get(post_key, 0) + 1
+        post_titles = {
+            **{("meme", row["id"]): row["title"] for row in memes.data},
+            **{("joke", row["id"]): row["text"] for row in jokes.data},
+        }
+        top_posts = [
+            {
+                "Post": post_titles[key][:80],
+                "Type": key[0].title(),
+                "Reactions": count,
+            }
+            for key, count in sorted(
+                reaction_counts.items(), key=lambda item: item[1], reverse=True
+            )
+            if key in post_titles
+        ][:5]
+        active_today = len({
+            row["user_id"] for row in activity_records
+            if row["activity_date"] == date.today().isoformat()
+        })
+        return {
+            "moods": [int(row["mood_score"]) for row in moods],
+            "mood_records": moods,
+            "activity_records": activity_records,
+            "game_scores": scores,
+            "meme_count": memes.count or len(memes.data),
+            "joke_count": jokes.count or len(jokes.data),
+            "active_today": active_today,
+            "top_posts": top_posts,
+        }
+    except Exception:
+        return None
+
+
+def summarize_pulse_records(records):
+    summary = summarize_mood_pulse(records)
+    if summary is None:
+        return None
+    return {
+        **summary,
+        "source": "live",
+        "updated_at": datetime.now().astimezone().strftime("%H:%M %Z"),
+    }
+
+
+def get_anonymous_pulse():
+    if st.session_state.get("demo_mode"):
+        return {
+            "source": "sample",
+            "participants": 24,
+            "checkins": 73,
+            "mix": {"upbeat": 48, "steady": 18, "taking it slow": 7},
+            "updated_at": datetime.now().astimezone().strftime("%H:%M %Z"),
+        }
+
+    week_ago = (datetime.now().astimezone() - timedelta(days=7)).isoformat(timespec="seconds")
+    if SUPABASE_AVAILABLE:
+        try:
+            records = supabase_client.table("mood_logs").select(
+                "user_id,timestamp,mood_score,mood_label"
+            ).gte("timestamp", week_ago).order("timestamp", desc=True).limit(5000).execute().data
+        except Exception:
+            records = None
+        if records is not None:
+            return summarize_pulse_records(records) or {
+                "source": "sample",
+                "participants": 24,
+                "checkins": 73,
+                "mix": {"upbeat": 48, "steady": 18, "taking it slow": 7},
+                "updated_at": datetime.now().astimezone().strftime("%H:%M %Z"),
+            }
+
+    local_records = [
+        record
+        for record in st.session_state.demo_mood_logs
+        if record.get("timestamp", "") >= week_ago
+    ]
+    local_pulse = summarize_pulse_records(local_records)
+    if local_pulse:
+        local_pulse["source"] = "session"
+        local_pulse["updated_at"] = datetime.now().astimezone().strftime("%H:%M %Z")
+        return local_pulse
+    return {
+        "source": "sample",
+        "participants": 24,
+        "checkins": 73,
+        "mix": {"upbeat": 48, "steady": 18, "taking it slow": 7},
+        "updated_at": datetime.now().astimezone().strftime("%H:%M %Z"),
+    }
+
+
+@st.fragment(run_every="60s")
+def render_anonymous_pulse():
+    pulse = get_anonymous_pulse()
+    st.markdown("#### 📡 Anonymous campus pulse")
+    if pulse["source"] == "sample":
+        st.caption("Illustrative sample only — these are not live campus or user statistics.")
+    elif pulse["source"] == "session":
+        st.caption("Anonymous aggregate from this app session · refreshes every minute.")
+    else:
+        st.caption(
+            "Anonymous aggregate across this app's shared database · refreshes every minute. "
+            "This is not a campus-wide census."
+        )
+
+    pulse_cols = st.columns(2)
+    pulse_cols[0].metric("Check-ins · last 7 days", pulse["checkins"])
+    pulse_cols[1].metric("Anonymous participants", pulse["participants"])
+    total = sum(pulse["mix"].values())
+    if total:
+        vibe_summary = " · ".join(
+            f"{html.escape(vibe.title())}: {count / total:.0%}"
+            for vibe, count in pulse["mix"].items()
+        )
+        st.markdown(f"**Vibe mix:** {vibe_summary}", unsafe_allow_html=True)
+    if pulse["source"] != "sample":
+        st.caption(
+            "To protect privacy, live totals appear only after at least 5 distinct pseudonyms "
+            "check in; small mood groups are combined or omitted."
+        )
+
+
+def get_post_interactions(target_type, target_id, user_id):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        key = f"{target_type}:{target_id}"
+        reactions = st.session_state.demo_reactions.get(key, {})
+        comments = st.session_state.demo_comments.get(key, [])
+        return {
+            "counts": {name: sum(value == name for value in reactions.values()) for name in ("like", "laugh", "love")},
+            "mine": reactions.get(user_id),
+            "comments": comments,
+        }
+    try:
+        reactions = supabase_client.table("reactions").select(
+            "user_id,reaction"
+        ).eq("target_type", target_type).eq("target_id", target_id).execute().data
+        comments = supabase_client.table("comments").select(
+            "user_id,body,created_at"
+        ).eq("target_type", target_type).eq("target_id", target_id).order("created_at").limit(30).execute().data
+        return {
+            "counts": {
+                name: sum(item["reaction"] == name for item in reactions)
+                for name in ("like", "laugh", "love")
+            },
+            "mine": next((item["reaction"] for item in reactions if item["user_id"] == user_id), None),
+            "comments": comments,
+        }
+    except Exception:
+        return None
+
+
+def set_post_reaction(target_type, target_id, user_id, reaction):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        key = f"{target_type}:{target_id}"
+        reactions = st.session_state.demo_reactions.setdefault(key, {})
+        if reactions.get(user_id) == reaction:
+            del reactions[user_id]
+        else:
+            reactions[user_id] = reaction
+        return True
+    try:
+        query = supabase_client.table("reactions").select("id,reaction").eq(
+            "target_type", target_type
+        ).eq("target_id", target_id).eq("user_id", user_id).maybe_single().execute()
+        if query.data and query.data["reaction"] == reaction:
+            supabase_client.table("reactions").delete().eq("id", query.data["id"]).execute()
+        else:
+            supabase_client.table("reactions").upsert(
+                {
+                    "target_type": target_type,
+                    "target_id": target_id,
+                    "user_id": user_id,
+                    "reaction": reaction,
+                },
+                on_conflict="target_type,target_id,user_id",
+            ).execute()
+        return True
+    except Exception:
+        return False
+
+
+def add_post_comment(target_type, target_id, user_id, body):
+    clean_body = body.strip()[:300]
+    if not clean_body:
+        return False
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        key = f"{target_type}:{target_id}"
+        comments = st.session_state.demo_comments.setdefault(key, [])
+        comments.append({"user_id": user_id, "body": clean_body})
+        return True
+    try:
+        supabase_client.table("comments").insert(
+            {
+                "target_type": target_type,
+                "target_id": target_id,
+                "user_id": user_id,
+                "body": clean_body,
+            }
+        ).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_chat_messages(include_hidden=False):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        messages = st.session_state.chat_messages
+        if not include_hidden:
+            messages = [message for message in messages if not message.get("is_hidden", False)]
+        return messages[-50:]
+    try:
+        query = supabase_client.table("chat_messages").select(
+            "id,user_id,display_name,body,created_at,is_hidden,"
+            "attachment_path,attachment_name,attachment_type,attachment_size"
+        )
+        if not include_hidden:
+            query = query.eq("is_hidden", False)
+        messages = query.order("created_at", desc=True).limit(50).execute().data[::-1]
+        for message in messages:
+            attachment_path = message.get("attachment_path")
+            if attachment_path:
+                signed_url = supabase_client.storage.from_(
+                    SUPABASE_CHAT_BUCKET
+                ).create_signed_url(attachment_path, 3600)
+                message["attachment_url"] = signed_url.get("signedURL")
+        return messages
+    except Exception:
+        return None
+
+
+def send_chat_message(user_id, display_name, body, attachment=None):
+    clean_body = body.strip()
+    if len(clean_body) > 500 or (not clean_body and attachment is None):
+        return False
+    now = datetime.now().astimezone()
+    last_sent = st.session_state.get("chat_last_sent_at")
+    if isinstance(last_sent, datetime) and (now - last_sent).total_seconds() < 2:
+        return False
+    message = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "display_name": display_name.strip()[:30] or "Student",
+        "body": clean_body,
+        "created_at": now.isoformat(timespec="seconds"),
+        "is_hidden": False,
+    }
+    attachment_path = None
+    if attachment is not None:
+        try:
+            validated_type = validate_chat_attachment(
+                attachment["name"], attachment["type"], attachment["data"]
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        safe_name = os.path.basename(attachment["name"].replace("\\", "/"))[:120]
+        attachment_path = f"{user_id}/{uuid.uuid4().hex}{os.path.splitext(safe_name)[1].lower()}"
+        message.update(
+            {
+                "attachment_name": safe_name,
+                "attachment_type": validated_type,
+                "attachment_size": len(attachment["data"]),
+            }
+        )
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        if attachment is not None:
+            message["attachment_data"] = attachment["data"]
+        st.session_state.chat_messages.append(message)
+    else:
+        try:
+            if attachment is not None:
+                supabase_client.storage.from_(SUPABASE_CHAT_BUCKET).upload(
+                    attachment_path,
+                    attachment["data"],
+                    file_options={
+                        "content-type": message["attachment_type"],
+                        "upsert": "false",
+                    },
+                )
+                message["attachment_path"] = attachment_path
+            supabase_client.table("chat_messages").insert(message).execute()
+        except Exception:
+            if attachment_path:
+                try:
+                    supabase_client.storage.from_(SUPABASE_CHAT_BUCKET).remove(
+                        [attachment_path]
+                    )
+                except Exception:
+                    pass
+            return False
+    st.session_state.chat_last_sent_at = now
+    return True
+
+
+def set_chat_message_hidden(message_id, is_hidden):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        for message in st.session_state.chat_messages:
+            if message["id"] == message_id:
+                message["is_hidden"] = is_hidden
+                return True
+        return False
+    try:
+        response = supabase_client.table("chat_messages").update(
+            {"is_hidden": is_hidden}
+        ).eq("id", message_id).select("id").execute()
+        return bool(response.data)
+    except Exception:
+        return False
+
+
+@st.fragment(run_every="10s")
+def render_community_chat():
+    st.markdown("### 💬 Community chat")
+    if st.session_state.demo_mode:
+        st.info("Presentation demo · chat messages are stored only in this session.")
+    elif SUPABASE_AVAILABLE:
+        st.caption("Shared community chat · refreshes automatically every 10 seconds.")
+    else:
+        st.info("Session-only chat · connect Supabase to chat with people in other sessions.")
+    st.caption(
+        "Community chat is not private: messages and uploaded files are visible to other chat users "
+        "and may be examined by the app's moderators. Be careful—never share passwords, contact "
+        "details, or other personal or sensitive information."
+    )
+
+    attachment_key = (
+        f"community_chat_attachment_{st.session_state.chat_attachment_widget_version}"
+    )
+    uploaded_file = st.file_uploader(
+        "Attach one PNG, JPG, WebP, PDF, or TXT file (max 1 MB)",
+        type=["png", "jpg", "jpeg", "webp", "pdf", "txt"],
+        key=attachment_key,
+        max_upload_size=1,
+    )
+    with st.form("community_chat_form", clear_on_submit=True):
+        message_text = st.text_area(
+            "Your message",
+            max_chars=500,
+            placeholder="Say hello to the community...",
+            height=90,
+        )
+        send_message = st.form_submit_button("Send message 💌", width="stretch")
+    if send_message:
+        attachment = None
+        if uploaded_file is not None:
+            attachment = {
+                "name": uploaded_file.name,
+                "type": uploaded_file.type,
+                "data": uploaded_file.getvalue(),
+            }
+            try:
+                attachment["type"] = validate_chat_attachment(
+                    attachment["name"], attachment["type"], attachment["data"]
+                )
+            except ValueError as error:
+                st.warning(str(error))
+                attachment = False
+        if attachment is False:
+            pass
+        elif not message_text.strip() and attachment is None:
+            st.warning("Write a message or attach a file before sending.")
+        elif st.session_state.get("chat_last_sent_at") and (
+            datetime.now().astimezone() - st.session_state.chat_last_sent_at
+        ).total_seconds() < 2:
+            st.warning("Please wait a moment before sending another message.")
+        elif send_chat_message(
+            st.session_state.user_id,
+            st.session_state.get("profile_display_name", "Student"),
+            message_text,
+            attachment,
+        ):
+            record_activity(st.session_state.user_id, "community_chat", 2)
+            st.session_state.chat_attachment_widget_version += 1
+            st.toast("Message sent!")
+            st.rerun()
+        else:
+            st.error("Could not send your message. Check the connection and try again.")
+
+    messages = get_chat_messages(include_hidden=st.session_state.admin_authenticated)
+    if messages is None:
+        st.error("The shared chat is unavailable. Check the database setup and connection.")
+        return
+    if not messages:
+        st.info("No messages yet. Start the conversation!")
+        return
+
+    for message in reversed(messages):
+        if message.get("is_hidden", False):
+            with st.expander("Hidden message · owner only"):
+                st.caption(f"{message['display_name']} · {message['created_at']}")
+                st.markdown(html.escape(message["body"]))
+                if message.get("attachment_data") is not None:
+                    st.download_button(
+                        f"Download {html.escape(message['attachment_name'])}",
+                        data=message["attachment_data"],
+                        file_name=os.path.basename(message["attachment_name"]),
+                        mime=message["attachment_type"],
+                        key=f"chat_download_{message['id']}",
+                    )
+                elif message.get("attachment_path"):
+                    attachment_url = message.get("attachment_url")
+                    if attachment_url:
+                        st.link_button(
+                            f"Download {message['attachment_name']}",
+                            attachment_url,
+                            help="This private file link expires in one hour.",
+                        )
+                    else:
+                        st.caption("Attachment link could not be generated. Refresh to try again.")
+                if st.button("Restore message", key=f"restore_chat_{message['id']}"):
+                    if set_chat_message_hidden(message["id"], False):
+                        st.toast("Message restored.")
+                        st.rerun()
+                    st.error("Could not restore this message.")
+            continue
+
+        with st.container(border=True):
+            st.markdown(
+                f"**{html.escape(message['display_name'])}** · "
+                f"<span style='color:#73695f'>{html.escape(message['created_at'])}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(html.escape(message["body"]))
+            if message.get("attachment_data") is not None:
+                st.download_button(
+                    f"Download {html.escape(message['attachment_name'])}",
+                    data=message["attachment_data"],
+                    file_name=os.path.basename(message["attachment_name"]),
+                    mime=message["attachment_type"],
+                    key=f"chat_download_{message['id']}",
+                )
+            elif message.get("attachment_path"):
+                attachment_url = message.get("attachment_url")
+                if attachment_url:
+                    st.link_button(
+                        f"Download {message['attachment_name']}",
+                        attachment_url,
+                        help="This private file link expires in one hour.",
+                    )
+                else:
+                    st.caption("Attachment link could not be generated. Refresh to try again.")
+            if st.session_state.admin_authenticated and st.button(
+                "Hide message",
+                key=f"hide_chat_{message['id']}",
+            ):
+                if set_chat_message_hidden(message["id"], True):
+                    st.toast("Message hidden from the community.")
+                    st.rerun()
+                st.error("Could not hide this message.")
+
+
+def save_mood_log(user_id, mood_score, mood_label, recommendation):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        st.session_state.demo_mood_logs.append(
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "mood_score": mood_score,
+                "mood_label": mood_label,
+                "recommendation": recommendation,
+            }
+        )
+        return True
     try:
         supabase_client.table("mood_logs").insert(
             {
                 "user_id": user_id,
                 "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "mood_score": mood_score,
+                "mood_label": mood_label,
                 "recommendation": recommendation,
             }
         ).execute()
@@ -1646,25 +2475,149 @@ def save_mood_log(user_id, mood_score, recommendation):
 
 
 def get_user_history(user_id):
+    if st.session_state.get("demo_mode") or not SUPABASE_AVAILABLE:
+        return pd.DataFrame(
+            [item for item in st.session_state.demo_mood_logs if item["user_id"] == user_id],
+            columns=["id", "user_id", "timestamp", "mood_score", "mood_label", "recommendation"],
+        )
     if not SUPABASE_AVAILABLE:
-        return pd.DataFrame(columns=["id", "user_id", "timestamp", "mood_score", "recommendation"])
+        return None
 
     try:
         response = supabase_client.table("mood_logs").select(
-            "id,user_id,timestamp,mood_score,recommendation"
+            "id,user_id,timestamp,mood_score,mood_label,recommendation"
         ).eq("user_id", user_id).order("timestamp").execute()
         return pd.DataFrame(response.data)
     except Exception:
-        return pd.DataFrame(columns=["id", "user_id", "timestamp", "mood_score", "recommendation"])
+        return None
 
-def hash_pseudonym(raw_id: str) -> str:
-    raw_id = raw_id.strip().lower()
-    return "FUN-" + hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:8].upper()
+
+def delete_user_history(user_id):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        st.session_state.demo_mood_logs = [
+            item for item in st.session_state.demo_mood_logs if item["user_id"] != user_id
+        ]
+        return True
+    try:
+        supabase_client.table("mood_logs").delete().eq("user_id", user_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def render_report_control(target_type, target_id, reporter_id, key_suffix):
+    if not SUPABASE_AVAILABLE or st.session_state.get("demo_mode"):
+        return
+    with st.expander("Report this post"):
+        with st.form(f"report_{target_type}_{key_suffix}"):
+            reason = st.selectbox(
+                "Reason",
+                ["Inappropriate content", "Spam", "Harassment", "Copyright concern", "Other"],
+                key=f"report_reason_{target_type}_{key_suffix}",
+            )
+            submitted = st.form_submit_button("Send report")
+        if submitted:
+            if submit_content_report(target_type, target_id, reporter_id, reason):
+                st.success("Thanks. The post has been sent to the moderation queue.")
+            else:
+                st.warning("Could not save this report. Check the connection or see if it was already submitted.")
+
+
+def render_moderation_queue():
+    if st.session_state.get("demo_mode"):
+        st.caption("The demo workspace does not access the live moderation queue.")
+        return
+    reports = get_open_content_reports()
+    if reports is None:
+        st.warning("Reports are unavailable. Check the Supabase connection and database setup.")
+        return
+    st.markdown("#### Open community reports")
+    if not reports:
+        st.caption("There are no open reports.")
+        return
+    for report in reports:
+        target_label = "Meme" if report["target_type"] == "meme" else "Joke"
+        with st.expander(f"{target_label} report · {report['reason']}"):
+            st.caption(
+                f"Submitted {report['created_at']} · Reporter {report['reporter_id']} · "
+                f"Post {report['target_id']}"
+            )
+            hide_col, dismiss_col = st.columns(2)
+            with hide_col:
+                if st.button("Hide post and resolve", key=f"hide_report_{report['id']}"):
+                    if resolve_content_report(
+                        report["id"], report["target_type"], report["target_id"], hide_content=True
+                    ):
+                        st.toast("Post hidden and report resolved.")
+                        st.rerun()
+                    st.error("Could not hide the post or resolve its report.")
+            with dismiss_col:
+                if st.button("Dismiss report", key=f"dismiss_report_{report['id']}"):
+                    if resolve_content_report(report["id"]):
+                        st.toast("Report dismissed.")
+                        st.rerun()
+                    st.error("Could not resolve this report.")
+
+
+def render_post_interactions(target_type, target_id, user_id):
+    interaction_data = get_post_interactions(target_type, target_id, user_id)
+    if interaction_data is None:
+        st.caption("Reactions and comments are temporarily unavailable.")
+        return
+    reaction_columns = st.columns(3)
+    for column, reaction, label in zip(
+        reaction_columns, ("like", "laugh", "love"), ("Like", "Laugh", "Love")
+    ):
+        with column:
+            selected = interaction_data["mine"] == reaction
+            if st.button(
+                f"{'✓ ' if selected else ''}{label} · {interaction_data['counts'][reaction]}",
+                key=f"reaction_{target_type}_{target_id}_{reaction}",
+                width="stretch",
+            ):
+                if set_post_reaction(target_type, target_id, user_id, reaction):
+                    record_activity(user_id, "community_reaction", 2)
+                    st.rerun()
+                st.error("Could not save your reaction.")
+    with st.form(f"comment_{target_type}_{target_id}", clear_on_submit=True):
+        comment = st.text_input("Add a comment", max_chars=300, key=f"comment_input_{target_type}_{target_id}")
+        submitted = st.form_submit_button("Post comment")
+    if submitted:
+        if add_post_comment(target_type, target_id, user_id, comment):
+            record_activity(user_id, "community_comment", 3)
+            st.rerun()
+        st.error("Could not post your comment. Make sure it is not empty.")
+    if interaction_data["comments"]:
+        with st.expander(f"Comments ({len(interaction_data['comments'])})"):
+            for item in interaction_data["comments"]:
+                st.markdown(
+                    f"<div class='community-comment'><b>{html.escape(item['user_id'])}</b> · "
+                    f"{html.escape(item['body'])}</div>",
+                    unsafe_allow_html=True,
+                )
+
+
+def render_game_embed(markup, height, description):
+    accessibility_styles = """
+    <style>
+      :focus-visible { outline: 3px solid #f0bd78 !important; outline-offset: 3px !important; }
+      button { font: inherit; }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+      }
+    </style>
+    """
+    st.iframe(
+        markup + accessibility_styles,
+        height=height,
+        alt=description,
+    )
+
 
 # --- UI Helpers ---
 
 def inject_css():
-    """Injects custom CSS for the fun theme."""
+    """Injects the app's shared visual theme."""
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Fredoka:wght@500;600;700&display=swap');
@@ -1677,13 +2630,25 @@ def inject_css():
         color: #282522;
         font-family: 'DM Sans', sans-serif;
     }
+    [data-testid="stMainBlockContainer"] {
+        max-width: 1240px;
+        padding-top: 2rem;
+        padding-bottom: 4rem;
+    }
     h1, h2, h3, h4, [data-testid="stMetricValue"] {
+        color: #282522;
         font-family: 'Fredoka', sans-serif !important;
+        font-weight: 600;
         letter-spacing: 0;
     }
-    h1 { color: #e8593d; }
-    .stCaption, [data-testid="stCaption"] { color: #73695f; }
+    h1 { color: #e8593d; font-size: clamp(2rem, 4vw, 3rem) !important; }
+    h2 { font-size: clamp(1.45rem, 3vw, 2rem) !important; }
+    p, label, [data-testid="stCaption"] { color: #73695f; }
+    [data-testid="stSidebar"] { background: #fff3e6; }
+    [data-testid="stSidebar"] h2 { color: #e8593d; }
+    [data-testid="stSidebar"] [data-testid="stCaption"] { color: #73695f; }
     .stButton > button, [data-testid="stFormSubmitButton"] button {
+        min-height: 2.7rem;
         border: 2px solid #282522;
         border-radius: 12px;
         background: #ffd24c;
@@ -1697,55 +2662,189 @@ def inject_css():
         transform: translateY(-2px) rotate(-1deg);
         background: #ffbd59;
         box-shadow: 0 5px 0 #282522;
+        color: #282522;
     }
     .stTabs [data-baseweb="tab"] {
         font-family: 'DM Sans', sans-serif;
         font-weight: 800;
         padding: 10px 16px;
+        color: #73695f;
     }
+    .stTabs [aria-selected="true"] { color: #282522; }
     [data-baseweb="tab-highlight"] { background: #e8593d; }
     [data-testid="stForm"] {
         border: 2px solid #282522;
         border-radius: 16px;
-        background: rgba(255, 255, 255, 0.82);
+        background: rgba(255, 255, 255, 0.88);
         box-shadow: 5px 5px 0 #282522;
         padding: 20px;
+    }
+    [data-testid="stTextInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-testid="stSelectbox"] [data-baseweb="select"] > div {
+        border-color: #e4d6bf;
+        border-radius: 10px;
+        background: #fff;
+    }
+    [data-testid="stExpander"] {
+        border: 1px solid rgba(40, 37, 34, 0.22);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.76);
     }
     [data-testid="stFileUploader"] section {
         border: 2px dashed #e8593d;
         border-radius: 12px;
         background: #fff5e8;
     }
-    [data-testid="stExpander"] {
-        border-color: rgba(40, 37, 34, 0.22);
-        border-radius: 12px;
+    .welcome-hero {
+        position: relative;
+        overflow: hidden;
+        margin: 0 0 1.75rem;
+        padding: clamp(1.6rem, 4vw, 3rem);
+        border: 2px solid #282522;
+        border-radius: 18px;
+        background:
+            radial-gradient(circle at 92% 12%, rgba(76, 201, 240, .30), transparent 23%),
+            radial-gradient(circle at 8% 110%, rgba(255, 210, 76, .36), transparent 30%),
+            #fff1d5;
+        color: #282522;
+        box-shadow: 5px 5px 0 #282522;
+    }
+    .welcome-hero::after {
+        position: absolute;
+        right: -45px;
+        bottom: -120px;
+        width: 280px;
+        height: 280px;
+        border: 2px solid rgba(232, 89, 61, 0.22);
+        border-radius: 50%;
+        content: "";
+        box-shadow: 0 0 0 34px rgba(232, 89, 61, 0.045), 0 0 0 70px rgba(65, 196, 177, 0.08);
+        pointer-events: none;
+    }
+    .welcome-eyebrow {
+        margin-bottom: .7rem;
+        color: #a35d38;
+        font-size: .72rem;
+        font-weight: 700;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+    }
+    .welcome-hero h1 {
+        margin: 0 0 .65rem;
+        color: #e8593d;
+        font-size: clamp(2.2rem, 5vw, 3.6rem) !important;
+        line-height: 1.1;
+        text-shadow: 2px 2px 0 rgba(255, 210, 76, .6);
+    }
+    .welcome-hero p {
+        max-width: 600px;
+        margin: 0;
+        color: #5d6259;
+        font-size: 1rem;
+        line-height: 1.65;
+    }
+    .feature-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .55rem;
+        margin-top: 1.45rem;
+    }
+    .feature-pill {
+        padding: .42rem .75rem;
+        border: 1px solid rgba(40, 37, 34, .28);
+        border-radius: 999px;
+        background: #fff;
+        color: #282522;
+        font-size: .8rem;
+        font-weight: 700;
+    }
+    .section-kicker {
+        margin: .15rem 0 .45rem;
+        color: #e8593d;
+        font-size: .72rem;
+        font-weight: 700;
+        letter-spacing: .12em;
+        text-transform: uppercase;
+    }
+    :focus-visible {
+        outline: 3px solid #e8593d !important;
+        outline-offset: 3px !important;
+    }
+    .stButton > button:focus-visible,
+    [data-testid="stFormSubmitButton"] button:focus-visible {
+        outline: 3px solid #e8593d !important;
+        outline-offset: 3px !important;
+    }
+    [data-testid="stMarkdownContainer"] a { color: #d04f35; text-underline-offset: 3px; }
+    [data-testid="stMetric"] {
+        padding: 1rem;
+        border: 2px solid #282522;
+        border-radius: 14px;
+        background: #fff;
+        box-shadow: 3px 3px 0 rgba(40, 37, 34, .22);
+    }
+    .profile-avatar {
+        display: inline-grid;
+        width: 3.2rem;
+        height: 3.2rem;
+        place-items: center;
+        border-radius: 50%;
+        color: #fff;
+        border: 2px solid #282522;
+        font: 700 1.35rem 'Fredoka', sans-serif;
+    }
+    .community-comment {
+        padding: .6rem .75rem;
+        border-left: 3px solid #e8593d;
+        border-radius: 0 10px 10px 0;
+        background: #fff8e9;
+        color: #4a4138;
+        font-size: .9rem;
     }
     @media (max-width: 640px) {
+        [data-testid="stMainBlockContainer"] { padding: 1.25rem 1rem 3rem; }
         [data-testid="stForm"] { padding: 14px; }
         .stTabs [data-baseweb="tab"] { padding: 8px 7px; font-size: 0.83rem; }
+        .welcome-hero { border-radius: 14px; box-shadow: 3px 3px 0 #282522; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+            scroll-behavior: auto !important;
+            animation-duration: .01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: .01ms !important;
+        }
     }
     </style>
     """, unsafe_allow_html=True)
 
 def hero_header(title, subtitle, chips=None):
-    st.title(title)
-    st.subheader(subtitle)
+    feature_markup = ""
     if chips:
-        cols = st.columns(len(chips))
-        for col, chip in zip(cols, chips):
-            col.info(chip)
+        feature_markup = "<div class='feature-pills'>" + "".join(
+            f"<span class='feature-pill'>{html.escape(chip)}</span>" for chip in chips
+        ) + "</div>"
+    st.markdown(
+        f"<section class='welcome-hero'><div class='welcome-eyebrow'>A small break, well spent</div>"
+        f"<h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p>{feature_markup}</section>",
+        unsafe_allow_html=True,
+    )
 
 # --- Page Setup ---
 
 st.set_page_config(
-    page_title="Giggle and Laugh",
-    page_icon="😂",
+    page_title=APP_TITLE,
+    page_icon="✦",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-if not SUPABASE_AVAILABLE:
-    st.warning("Supabase is not connected. Mood history, memes, and jokes will only be saved for this session.")
+if not SUPABASE_AVAILABLE and not st.session_state.get("demo_mode", False):
+    st.warning(
+        "Supabase is not connected or its schema is incomplete. Mood history, reports, and "
+        "shared scores are unavailable; community posts will only be saved for this session."
+    )
     if SUPABASE_ERROR:
         st.caption("Check the Supabase secrets and run the SQL setup script from the project.")
 inject_css()
@@ -1761,11 +2860,40 @@ if "community_jokes" not in st.session_state:
     st.session_state.community_jokes = []
 if "admin_authenticated" not in st.session_state:
     st.session_state.admin_authenticated = False
+if "demo_mode" not in st.session_state:
+    st.session_state.demo_mode = False
+if "profile_display_name" not in st.session_state:
+    st.session_state.profile_display_name = ""
+for state_key in ("demo_profiles", "demo_comments", "demo_reactions"):
+    if state_key not in st.session_state:
+        st.session_state[state_key] = {}
+if "demo_activity_events" not in st.session_state:
+    st.session_state.demo_activity_events = []
+if "demo_game_scores" not in st.session_state:
+    st.session_state.demo_game_scores = []
+if "demo_mood_logs" not in st.session_state:
+    st.session_state.demo_mood_logs = []
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+if "chat_attachment_widget_version" not in st.session_state:
+    st.session_state.chat_attachment_widget_version = 0
+if "demo_seeded" not in st.session_state:
+    st.session_state.demo_seeded = False
+if "india_gk_index" not in st.session_state:
+    st.session_state.india_gk_index = random.randrange(len(INDIA_GK_QUESTIONS))
+if "india_gk_answer_revealed" not in st.session_state:
+    st.session_state.india_gk_answer_revealed = False
+if "riddle_index" not in st.session_state:
+    st.session_state.riddle_index = 0
+if "riddle_started_at" not in st.session_state:
+    st.session_state.riddle_started_at = None
+if "riddle_answer_revealed" not in st.session_state:
+    st.session_state.riddle_answer_revealed = False
 
 # --- Sidebar ---
 
 with st.sidebar:
-    st.markdown("## 😂 Giggle and Laugh")
+    st.markdown(f"## 😂 {APP_TITLE}")
     st.caption(APP_SUBTITLE)
     st.divider()
 
@@ -1773,12 +2901,12 @@ with st.sidebar:
         st.info("Log in from the main page to unlock all tabs.")
     else:
         st.success(f"Hi there, **{st.session_state.user_id}**")
-        if st.button("End Session", use_container_width=True):
+        if st.button("End Session", width="stretch"):
             st.session_state.logged_in = False
             st.session_state.user_id = ""
             # Clear other session keys to prevent stale state errors
             for k in list(st.session_state.keys()):
-                if k not in ("logged_in", "user_id"):
+                if k not in ("logged_in", "user_id", "demo_mode", "demo_mood_logs", "chat_messages"):
                     del st.session_state[k]
             st.rerun()
 
@@ -1788,7 +2916,7 @@ with st.sidebar:
             st.caption("Set APP_ADMIN_PASSWORD in Streamlit secrets to enable content management.")
         elif st.session_state.admin_authenticated:
             st.success("Owner access is enabled for this session.")
-            if st.button("Lock owner tools", key="admin_logout", use_container_width=True):
+            if st.button("Lock owner tools", key="admin_logout", width="stretch"):
                 st.session_state.admin_authenticated = False
                 st.rerun()
         else:
@@ -1804,43 +2932,107 @@ with st.sidebar:
 
 # --- Main Content ---
 
-st.title("😂 Giggle and Laugh")
-st.caption("Because life is too short to be serious all the time.")
-
 if not st.session_state.logged_in:
     hero_header(
-        "Welcome to Giggle and Laugh",
-        "Play games, read jokes, view memes, and track your vibe.",
+        "Welcome to Giggle and Laugh!",
+        "Your little corner for mini games, memes, jokes, and a mood check. Come in, pick a game, and leave with a smile.",
         chips=[
-            "🎮 Mini Games",
-            "😂 Hilarious Jokes",
-            "🖼️ Meme Gallery",
-            "🧘 Mood Tracker"
+            "🎮 Mini games",
+            "✨ Daily challenges",
+            "🏅 Player badges",
+            "😂 Jokes",
+            "🖼️ Meme gallery",
+            "🧘 Mood tracker"
         ],
     )
 
     left, right = st.columns([1.2, 1])
 
     with left:
+        st.markdown("<div class='section-kicker'>Get started</div>", unsafe_allow_html=True)
         st.markdown("#### 👋 Quick Login")
+        if "demo_mode_toggle" not in st.session_state:
+            st.session_state.demo_mode_toggle = st.session_state.demo_mode
+        st.checkbox(
+            "Use presentation demo mode",
+            key="demo_mode_toggle",
+            help="Load sample analytics and keep profile, activity, reaction, and chat data in this browser session.",
+        )
+        st.session_state.demo_mode = st.session_state.demo_mode_toggle
+        if st.session_state.demo_mode and not st.session_state.demo_seeded:
+            st.session_state.community_memes.extend(
+                [
+                    {
+                        "_id": "demo-meme-1",
+                        "title": "Monday loading...",
+                        "desc": "When the coffee has not kicked in yet.",
+                        "image": None,
+                        "user_id": "FUN-DEMO",
+                    }
+                ]
+            )
+            st.session_state.community_jokes.extend(
+                [
+                    {
+                        "_id": "demo-joke-1",
+                        "category": "Tech",
+                        "text": "Why did the developer go broke? Because they used up all their cache.",
+                        "user_id": "FUN-DEMO",
+                    }
+                ]
+            )
+            demo_score_timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            st.session_state.demo_game_scores.extend([
+                {"user_id": "FUN-DEMO", "game_name": game_name, "score": score, "created_at": demo_score_timestamp}
+                for game_name, score in [
+                    ("clicker", 72),
+                    ("flap-dash", 12),
+                    ("temple-dash", 340),
+                    ("grand-prix", 840),
+                    ("skyway-sprint", 510),
+                    ("rock-paper-scissors", 1),
+                    ("rock-paper-scissors", 1),
+                    ("rock-paper-scissors", 0),
+                    ("rock-paper-scissors", 1),
+                ]
+            ])
+            st.session_state.demo_seeded = True
         with st.form("login_form"):
-            raw_id = st.text_input("Nickname", placeholder="e.g. Chuckles")
-            go = st.form_submit_button("Start Laughing 🎈", use_container_width=True, type="primary")
+            raw_id = st.text_input("Choose a nickname", placeholder="e.g. Alex")
+            go = st.form_submit_button("Start Laughing 🎈", width="stretch", type="primary")
         if go:
             if raw_id.strip():
                 st.session_state.user_id = hash_pseudonym(raw_id)
+                st.session_state.profile_display_name = raw_id.strip()[:30]
                 st.session_state.logged_in = True
+                if st.session_state.demo_mode:
+                    st.session_state.demo_profiles[st.session_state.user_id] = {
+                        "display_name": st.session_state.profile_display_name,
+                        "avatar_color": "#24473f",
+                        "bio": "",
+                    }
+                else:
+                    save_profile(
+                        st.session_state.user_id,
+                        st.session_state.profile_display_name,
+                        "#24473f",
+                        "",
+                    )
                 st.rerun()
             else:
                 st.warning("Please enter a nickname to continue.")
 
     with right:
+        st.markdown("<div class='section-kicker'>Explore</div>", unsafe_allow_html=True)
         st.markdown("#### ✨ What's inside")
         st.markdown("""
-        - **Vibe Check** — log your mood, see your trend
-        - **Games Zone** — clicker, Flap Dash, Temple Dash, Grand Prix, Skyway Sprint, and Rock Paper Scissors
-        - **Meme Gallery** — instant laughs
-        - **Joke Factory** — filterable puns & one-liners
+        - **Daily challenges** — build streaks and collect badges
+        - **Overview dashboard** — explore mood trends and community activity
+        - **Mood check** — record how you feel and see your history
+        - **Games** — six quick experiences, from arcade classics to original runners
+        - **Meme gallery** — browse community posts and templates
+        - **Community chat** — talk with other people using the app
+        - **Jokes** — explore a filterable library or share your own
         """)
 
     st.stop()  # Only stops here, AFTER showing the login UI
@@ -1848,30 +3040,262 @@ if not st.session_state.logged_in:
 
 # ---- Tabs (only reached when logged in) ----
 
-tab_vibe, tab_games, tab_memes, tab_jokes = st.tabs(
+st.title(f"😂 {APP_TITLE}")
+active_profile = get_profile(st.session_state.user_id)
+if active_profile is None:
+    st.warning("Your profile could not be loaded. Try again after checking the database connection.")
+    active_profile = {
+        "display_name": st.session_state.profile_display_name or "Guest",
+        "avatar_color": "#24473f",
+        "bio": "",
+    }
+st.caption(f"Welcome back, {html.escape(active_profile['display_name'])}. {APP_SUBTITLE}")
+if st.session_state.demo_mode:
+    st.info("Presentation demo mode · sample platform analytics are illustrative, not live community data.")
+
+(
+    tab_dashboard,
+    tab_daily,
+    tab_profile,
+    tab_vibe,
+    tab_games,
+    tab_memes,
+    tab_jokes,
+    tab_chat,
+    tab_india_gk,
+    tab_riddles,
+) = st.tabs(
     [
-        "🧘 Vibe Check",
+        "📊 Overview",
+        "🎯 Daily Challenge",
+        "🏅 Profile",
+        "🧘 Mood Check",
         "🎮 Games Zone",
         "🖼️ Meme Gallery",
         "😂 Joke Factory",
+        "💬 Community Chat",
+        "🇮🇳 India GK",
+        "🧩 Riddles",
     ]
 )
 
+with tab_dashboard:
+    st.markdown("### 📊 Community overview")
+    st.caption("A quick look at participation and what the community has been enjoying.")
+    render_anonymous_pulse()
+    analytics = get_platform_analytics()
+    if analytics is None:
+        st.info("Platform analytics need a working Supabase connection. Enable demo mode on the welcome screen to preview the dashboard.")
+    else:
+        mood_scores = analytics["moods"]
+        score_rows = analytics["game_scores"]
+        average_mood = sum(mood_scores) / len(mood_scores) if mood_scores else 0
+        games_played = len(score_rows)
+        games_col, mood_col, players_col, posts_col = st.columns(4)
+        games_col.metric("Recorded game rounds", f"{games_played:,}")
+        mood_col.metric("Average mood check-in", f"{average_mood:.1f} / 4" if mood_scores else "—")
+        players_col.metric("Daily active users", f"{analytics['active_today']:,}")
+        posts_col.metric("Community posts", f"{analytics['meme_count'] + analytics['joke_count']:,}")
+        if mood_scores:
+            mood_distribution = pd.Series(mood_scores, name="Check-ins").value_counts().sort_index()
+            mood_labels = {1: "Low energy", 2: "Neutral", 3: "Good", 4: "Great"}
+            mood_distribution.index = [mood_labels[int(score)] for score in mood_distribution.index]
+            st.markdown("#### 🧘 Mood check-in distribution")
+            st.bar_chart(mood_distribution)
+        mood_history = pd.DataFrame(analytics["mood_records"])
+        if not mood_history.empty:
+            mood_history["day"] = pd.to_datetime(mood_history["timestamp"]).dt.date
+            mood_trend = mood_history.groupby("day")["mood_score"].mean()
+            st.markdown("#### 📈 Mood trend")
+            st.line_chart(mood_trend, height=220)
+        activity_history = pd.DataFrame(analytics["activity_records"])
+        if not activity_history.empty:
+            daily_users = activity_history.groupby("activity_date")["user_id"].nunique()
+            st.markdown("#### 👥 Daily active users · last 30 days")
+            st.line_chart(daily_users, height=220)
+        if score_rows:
+            game_data = pd.DataFrame(score_rows)
+            game_counts = game_data.groupby("game_name").size().sort_values(ascending=False)
+            game_counts.name = "Recorded scores"
+            st.markdown("#### 🎮 Game activity")
+            st.bar_chart(game_counts)
+        if analytics["top_posts"]:
+            st.markdown("#### 💛 Community favorites")
+            st.dataframe(
+                pd.DataFrame(analytics["top_posts"]),
+                width="stretch",
+                hide_index=True,
+            )
+        st.caption(
+            "Live charts show anonymous aggregates from recent records. Arcade scores are self-reported; "
+            "mood trends are not a medical assessment. Demo charts use illustrative sample data."
+        )
+
+    user_events = get_user_activity(st.session_state.user_id)
+    if user_events is None:
+        st.warning("Your activity summary is unavailable. Check the database setup.")
+    else:
+        user_points = sum(int(event["points"]) for event in user_events)
+        user_streak = calculate_activity_streak([event["activity_date"] for event in user_events])
+        st.markdown("#### ✨ Your progress")
+        point_col, streak_col = st.columns(2)
+        point_col.metric("Points earned", user_points)
+        streak_col.metric("Active-day streak", f"{user_streak} days")
+
+with tab_daily:
+    st.markdown("### 🎯 Daily challenge")
+    st.caption("Small steps count. Complete one activity today to earn 10 bonus points.")
+    daily_events = get_user_activity(st.session_state.user_id)
+    if daily_events is None:
+        st.error("Daily challenge progress could not be loaded. Check the database connection.")
+    else:
+        today = date.today().isoformat()
+        today_events = [
+            event for event in daily_events
+            if event["activity_date"] == today and event["activity_type"] != "daily_reward"
+        ]
+        streak = calculate_activity_streak([event["activity_date"] for event in daily_events])
+        points = sum(int(event["points"]) for event in daily_events)
+        challenge_col, streak_col, points_col = st.columns(3)
+        challenge_col.metric("Today's progress", "Complete" if today_events else "0 / 1")
+        streak_col.metric("Current streak", f"{streak} days")
+        points_col.metric("Total points", points)
+        if today_events:
+            st.success("Challenge complete — your 10-point daily bonus is included in your total!")
+        else:
+            st.info("Try a mood check-in, play a round, react to a post, leave a comment, or share something.")
+        st.progress(1.0 if today_events else 0.0, text="Daily challenge")
+        st.markdown("#### 🏅 Streak rewards")
+        st.write("3 active days · 3-day streak badge")
+        st.write("7 active days · Week of good vibes badge")
+
+with tab_profile:
+    st.markdown("### 🏅 Your player profile")
+    st.caption("Your public nickname is a pseudonym, not a password-protected account.")
+    profile = get_profile(st.session_state.user_id)
+    if profile is None:
+        st.error("Could not load your profile. Try again after checking the database connection.")
+    else:
+        user_events = get_user_activity(st.session_state.user_id)
+        if user_events is None:
+            st.error("Profile activity is unavailable. Check the database connection.")
+            user_events = []
+        points = sum(int(event["points"]) for event in user_events)
+        streak = calculate_activity_streak([event["activity_date"] for event in user_events])
+        game_days = len({
+            (event["activity_type"], event["activity_date"])
+            for event in user_events
+            if event["activity_type"].startswith("play_")
+        })
+        badges = get_profile_badges(points, streak, game_days)
+        initials = html.escape(profile["display_name"][:1].upper() or "?")
+        avatar_color = profile.get("avatar_color", "#24473f")
+        st.markdown(
+            f"<span class='profile-avatar' style='background:{avatar_color}'>{initials}</span> "
+            f"**{html.escape(profile['display_name'])}** · `{st.session_state.user_id}`",
+            unsafe_allow_html=True,
+        )
+        if profile.get("bio"):
+            st.caption(html.escape(profile["bio"]))
+        point_col, streak_col, days_col = st.columns(3)
+        point_col.metric("Points", points)
+        streak_col.metric("Streak", f"{streak} days")
+        days_col.metric("Game sessions", game_days)
+        st.markdown("#### ✨ Achievements")
+        if badges:
+            st.write(" · ".join(f"🏅 {badge}" for badge in badges))
+        else:
+            st.caption("Keep checking in and joining the community to unlock badges.")
+        if user_events:
+            st.markdown("#### 🕒 Recent activity")
+            recent_events = sorted(
+                user_events,
+                key=lambda event: event["activity_date"],
+                reverse=True,
+            )[:5]
+            activity_table = pd.DataFrame(
+                [
+                    {
+                        "Activity": event["activity_type"].replace("_", " ").title(),
+                        "Date": event["activity_date"],
+                        "Points": event["points"],
+                    }
+                    for event in recent_events
+                ]
+            )
+            st.dataframe(activity_table, width="stretch", hide_index=True)
+        with st.form("profile_edit_form"):
+            display_name = st.text_input(
+                "Display name", value=profile["display_name"], max_chars=30
+            )
+            avatar_color = st.selectbox(
+                "Avatar color",
+                ["#24473f", "#a35e46", "#4c6b91", "#7a5c91", "#a47b36"],
+                index=["#24473f", "#a35e46", "#4c6b91", "#7a5c91", "#a47b36"].index(
+                    profile.get("avatar_color", "#24473f")
+                    if profile.get("avatar_color", "#24473f") in
+                    ["#24473f", "#a35e46", "#4c6b91", "#7a5c91", "#a47b36"]
+                    else "#24473f"
+                ),
+            )
+            bio = st.text_area("About you", value=profile.get("bio", ""), max_chars=160)
+            save_profile_button = st.form_submit_button("Save profile")
+        if save_profile_button:
+            if not display_name.strip():
+                st.warning("Display name cannot be empty.")
+            elif save_profile(
+                st.session_state.user_id, display_name, avatar_color, bio
+            ):
+                st.session_state.profile_display_name = display_name.strip()
+                st.toast("Profile saved.")
+                st.rerun()
+            else:
+                st.error("Could not save the profile. Check the database connection.")
+
 # 1. VIBE CHECK
 with tab_vibe:
-    st.markdown("### How's your vibe today?")
-    st.caption("Quickly tell us how you're feeling so we can recommend some content.")
+    st.markdown("### 🧘 Mood check")
+    st.caption("Take a moment to check in. Your selection helps us suggest something for your break.")
     
-    vibe_options = ["😢 Low Energy", "😐 Neutral", "🙂 Good", "🤩 Great"]
-    vibe_scores = [1, 2, 3, 4]
-    
-    selected_vibe_idx = st.radio("Select your current mood:", range(len(vibe_options)), format_func=lambda x: vibe_options[x], horizontal=True)
+    vibe_options = ["😢 Low Energy", "😐 Neutral", "🙂 Good", "🤩 Great", "😞 Sad", "🫥 Hopeless"]
+    vibe_scores = [1, 2, 3, 4, 1, 1]
+    vibe_labels = ["Low Energy", "Neutral", "Good", "Great", "Sad", "Hopeless"]
+    selected_vibe_idx = st.radio(
+        "How are you feeling?",
+        range(len(vibe_options)),
+        format_func=lambda index: vibe_options[index],
+        horizontal=True,
+    )
+    selected_mood_label = vibe_labels[selected_vibe_idx]
+    selected_mood_score = vibe_scores[selected_vibe_idx]
+    selected_meme_title = st.selectbox(
+        "Or pick a meme as your mood (optional)",
+        [""] + [meme["title"] for meme in MEME_TEMPLATES],
+        format_func=lambda title: title or "Choose a meme...",
+    )
+    if selected_meme_title:
+        selected_meme = next(
+            meme for meme in MEME_TEMPLATES if meme["title"] == selected_meme_title
+        )
+        selected_mood_label = selected_meme["mood_label"]
+        selected_mood_score = selected_meme["mood_score"]
+        st.info(
+            f"{selected_meme['emoji']} **{selected_meme_title}** — "
+            f"{selected_meme['emotion']}"
+        )
     
     if st.button("Get Recommendation"):
-        score = vibe_scores[selected_vibe_idx]
+        score = selected_mood_score
+        mood_label = selected_mood_label
         rec_text = ""
         
-        if score <= 2:
+        if mood_label in {"Sad", "Hopeless"}:
+            rec_text = (
+                "Thanks for checking in. You don't have to handle difficult feelings alone; "
+                "consider reaching out to someone you trust or your college counseling center."
+            )
+            st.info(rec_text)
+        elif score <= 2:
             rec_text = "You need a pick-me-up! Check out the 'Joke Factory' for puns, or play a game to distract yourself."
             st.info(rec_text)
         elif score == 3:
@@ -1883,53 +3307,160 @@ with tab_vibe:
             st.success(rec_text)
             
         # Save to DB
-        if save_mood_log(st.session_state.user_id, score, rec_text):
-            st.toast("Vibe logged successfully!")
+        if save_mood_log(st.session_state.user_id, score, mood_label, rec_text):
+                record_activity(st.session_state.user_id, "mood_check", 5)
+                st.toast("Vibe logged successfully!")
         else:
             st.warning("Supabase could not save this vibe. Check your connection and Supabase setup.")
 
     st.divider()
-    st.markdown("#### Your Recent Vibes")
+    st.markdown("#### 📈 Mood history")
     history_df = get_user_history(st.session_state.user_id)
-    if not history_df.empty:
+    history_unavailable = history_df is None
+    if history_unavailable:
+        st.error("Could not load mood history. Check the Supabase connection and database setup.")
+        history_df = pd.DataFrame(columns=["timestamp", "mood_score", "recommendation"])
+    elif not history_df.empty:
         chart_df = history_df.copy()
         chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"])
+        summary = summarize_mood_scores(chart_df["mood_score"].astype(int).tolist())
+        metric_count, metric_average, metric_change = st.columns(3)
+        metric_count.metric("Check-ins", summary["count"])
+        metric_average.metric("Average mood", f"{summary['average']:.1f} / 4")
+        metric_change.metric(
+            "Change over history",
+            "—" if summary["change"] is None else f"{summary['change']:+d}",
+            help="Difference between your most recent and earliest recorded mood.",
+        )
         st.line_chart(chart_df.set_index("timestamp")[["mood_score"]])
     else:
         st.write("No vibes logged yet. Click above to log one!")
 
+    if not history_unavailable:
+        distress_count = count_recent_distress_checkins(
+            history_df.to_dict("records")
+        )
+        if distress_count >= 3:
+            counseling_name = html.escape(
+                COUNSELING_CENTER_NAME or "your college counseling center"
+            )
+            counseling_phone = html.escape(COUNSELING_CENTER_PHONE)
+            phone_link = "".join(
+                char for char in COUNSELING_CENTER_PHONE if char.isdigit() or char == "+"
+            )
+            if phone_link:
+                st.info(
+                    f"💛 You've logged Sad or Hopeless check-ins {distress_count} times this week. "
+                    f"You deserve support. Contact **{counseling_name}** at "
+                    f"[{counseling_phone}](tel:{phone_link}) if you'd like to talk."
+                )
+            else:
+                st.info(
+                    f"💛 You've logged Sad or Hopeless check-ins {distress_count} times this week. "
+                    "You deserve support. Consider reaching out to someone you trust or your "
+                    "college counseling center. The college contact number hasn't been configured yet."
+                )
+
+        st.divider()
+        st.markdown("#### 🌷 Your mood garden")
+        st.caption(
+            "Each check-in day plants a flower that matches your mood. Plants keep their growth "
+            "through breaks; they grow again when you check in."
+        )
+        garden = build_mood_garden(history_df.to_dict("records"))
+        if garden:
+            garden_cols = st.columns(4)
+            plant_notes = {
+                "Cactus": "resilient through stress",
+                "Sunflower": "bright, happy energy",
+                "Tulip": "steady growth",
+                "Daisy": "a calm moment",
+                "Seedling": "rest and renewal",
+            }
+            for index, plant in enumerate(reversed(garden[-12:])):
+                with garden_cols[index % len(garden_cols)]:
+                    st.markdown(f"### {plant['flower']} {plant['plant_name']}")
+                    st.caption(
+                        f"{plant['date']} · {plant['mood_label']} · {plant['growth_label']} · "
+                        f"{plant_notes.get(plant['plant_name'], 'growing at your pace')}"
+                    )
+        else:
+            st.caption("Your first check-in will plant a flower here.")
+
+    with st.expander("Your data and privacy"):
+        st.caption(
+            "Mood check-ins are saved under your nickname-based ID. Download a copy or remove "
+            "your saved mood history at any time. Mood data is not a medical assessment."
+        )
+        st.warning(
+            "This demo's nickname login is not password-protected. Someone who enters the same "
+            "nickname may access that nickname's history. Do not enter sensitive information."
+        )
+        if history_unavailable:
+            st.caption("Download and deletion controls are unavailable until mood history can be loaded.")
+        elif not history_df.empty:
+            export_columns = [
+                column for column in ("timestamp", "mood_score", "mood_label", "recommendation")
+                if column in history_df.columns
+            ]
+            export_df = history_df[export_columns].copy()
+            st.download_button(
+                "Download mood history (CSV)",
+                data=export_df.to_csv(index=False).encode("utf-8"),
+                file_name="giggle-and-laugh-mood-history.csv",
+                mime="text/csv",
+                width="stretch",
+            )
+            confirm_delete = st.checkbox(
+                "I understand this permanently deletes my saved mood check-ins.",
+                key="confirm_delete_mood_history",
+            )
+            if st.button(
+                "Delete my mood history",
+                disabled=not confirm_delete,
+                type="secondary",
+                key="delete_mood_history",
+            ):
+                if delete_user_history(st.session_state.user_id):
+                    st.session_state.confirm_delete_mood_history = False
+                    st.toast("Your mood history has been deleted.")
+                    st.rerun()
+                st.error("Could not delete your mood history. Check the Supabase connection.")
+        else:
+            st.caption("There is no saved mood history to download or delete.")
+
 # 2. GAMES ZONE
 with tab_games:
-    st.markdown("### 🎮 Arcade Mode")
-    st.write("Pick a game and take the scenic route through your break.")
+    st.markdown("### 🎮 Games")
+    st.write("Choose a quick game for your break.")
     clicker_tab, flappy_tab, runner_tab, racer_tab, skyway_tab, rps_tab = st.tabs(
         ["✨ Clicker", "🐤 Flap Dash", "🏛️ Temple Dash", "🏎️ Grand Prix", "🌤️ Skyway Sprint", "✊ Rock Paper Scissors"]
     )
 
     with clicker_tab:
-        components.html(GAMES_HTML, height=350)
+        render_game_embed(GAMES_HTML, height=350, description="Clicker mini-game")
 
     with flappy_tab:
-        components.html(FLAPPY_HTML, height=455)
+        render_game_embed(FLAPPY_HTML, height=455, description="Flap Dash mini-game")
 
     with runner_tab:
-        components.html(RUNNER_HTML, height=700)
+        render_game_embed(RUNNER_HTML, height=700, description="Temple Dash mini-game")
 
     with racer_tab:
-        components.html(RACER_HTML, height=760)
+        render_game_embed(RACER_HTML, height=760, description="Grand Prix mini-game")
 
     with skyway_tab:
-        components.html(PLATFORMER_HTML, height=680)
+        render_game_embed(PLATFORMER_HTML, height=680, description="Skyway Sprint mini-game")
 
     with rps_tab:
-        st.markdown("#### ✊✋✌️ Rock, Paper, Scissors")
+        st.markdown("#### Rock, Paper, Scissors")
         st.markdown("""
         <style>
-            .rps-choice{min-height:126px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;margin:4px 0 10px;border-bottom:3px solid #d8c8a8;background:linear-gradient(180deg,rgba(255,255,255,.72),rgba(255,245,225,.3));color:#282522}
+            .rps-choice{min-height:126px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;margin:4px 0 10px;border:2px solid #282522;border-radius:14px;background:linear-gradient(180deg,#fff,#fff5e8);color:#282522;box-shadow:3px 3px 0 rgba(40,37,34,.18)}
             .rps-choice span{font-size:48px;line-height:1;filter:drop-shadow(2px 3px 0 rgba(40,37,34,.15))}
             .rps-choice b{font:800 13px 'DM Sans',sans-serif;letter-spacing:1px}
             .rps-choice small{color:#73695f;font:600 11px 'DM Sans',sans-serif}
-            .rps-result{display:flex;align-items:center;justify-content:center;gap:22px;min-height:154px;margin-top:18px;padding:16px;border:2px solid #282522;background:radial-gradient(ellipse at 50% 0,#fff1c9,#fffaf1 75%);text-align:center}
+            .rps-result{display:flex;align-items:center;justify-content:center;gap:22px;min-height:154px;margin-top:18px;padding:16px;border:2px solid #282522;border-radius:14px;background:radial-gradient(ellipse at 50% 0,#fff1c9,#fffaf1 75%);text-align:center;box-shadow:4px 4px 0 #282522}
             .rps-fighter{min-width:110px}.rps-fighter span{display:block;font-size:50px;line-height:1.15}.rps-fighter b{font:800 11px 'DM Sans',sans-serif;letter-spacing:1px;color:#73695f}
             .rps-versus{color:#e8593d;font:900 18px 'Fredoka',sans-serif}
             .rps-verdict{margin:10px 0 0;text-align:center;font:900 22px 'Fredoka',sans-serif;color:#2c766d}
@@ -1951,17 +3482,17 @@ with tab_games:
 
         def play_rps(choice):
             computer = random.choice(list(choices))
-            if choice == computer:
-                result = "draw"
-            elif (choice == "Rock" and computer == "Scissors") or \
-                 (choice == "Paper" and computer == "Rock") or \
-                 (choice == "Scissors" and computer == "Paper"):
-                result = "win"
-            else:
-                result = "loss"
+            result = get_rps_result(choice, computer)
             st.session_state.rps_player = choice
             st.session_state.rps_computer = computer
             st.session_state.rps_result = result
+            st.session_state.rps_wins = st.session_state.get("rps_wins", 0) + (result == "win")
+            st.session_state.rps_rounds = st.session_state.get("rps_rounds", 0) + 1
+            record_activity(st.session_state.user_id, "play_rps", 2)
+            if SUPABASE_AVAILABLE:
+                st.session_state.rps_score_save_error = not record_game_score(
+                    st.session_state.user_id, "rock-paper-scissors", int(result == "win")
+                )
 
         for column, choice in zip((col1, col2, col3), choices):
             with column:
@@ -1970,7 +3501,7 @@ with tab_games:
                     f"<div class='rps-choice'><span>{move['symbol']}</span><b>{choice.upper()}</b><small>{move['caption']}</small></div>",
                     unsafe_allow_html=True,
                 )
-                if st.button(f"Throw {choice}", key=f"rps_{choice.lower()}", use_container_width=True):
+                if st.button(f"Throw {choice}", key=f"rps_{choice.lower()}", width="stretch"):
                     play_rps(choice)
 
         if st.session_state.rps_result:
@@ -1991,9 +3522,90 @@ with tab_games:
         else:
             st.markdown("<p class='rps-verdict draw'>CHOOSE YOUR MOVE</p>", unsafe_allow_html=True)
 
+        st.caption(
+            f"Your session: {st.session_state.get('rps_wins', 0)} wins in "
+            f"{st.session_state.get('rps_rounds', 0)} rounds."
+        )
+        rps_period = st.selectbox(
+            "Leaderboard period",
+            ["All-time", "Last 7 days"],
+            key="rps_leaderboard_period",
+        )
+        leaderboard = get_game_leaderboard("rock-paper-scissors", rps_period)
+        if leaderboard is None:
+            st.info("Connect Supabase to save scores and see the shared leaderboard.")
+        elif leaderboard.empty:
+            if not SUPABASE_AVAILABLE and not st.session_state.demo_mode:
+                st.caption("Your rounds stay in this session. Connect Supabase to share a leaderboard.")
+            else:
+                st.caption("The leaderboard is waiting for its first score.")
+        else:
+            leaderboard_title = (
+                "Demo leaderboard · RPS wins"
+                if st.session_state.demo_mode
+                else "Community leaderboard · RPS wins"
+            )
+            st.markdown(f"#### {leaderboard_title}")
+            leaderboard_display = leaderboard.rename(
+                columns={"user_id": "Player", "wins": "Wins", "rounds": "Rounds"}
+            )
+            leaderboard_display.index = leaderboard_display.index + 1
+            st.dataframe(leaderboard_display, width="stretch")
+        if st.session_state.get("rps_score_save_error"):
+            st.warning("This round counted for your session, but its shared score could not be saved.")
+
+    st.divider()
+    st.markdown("#### Arcade scoreboards")
+    st.caption(
+        "Arcade best scores are player-submitted and unverified; Rock-Paper-Scissors results are recorded automatically."
+    )
+    arcade_games = {
+        "Clicker": "clicker",
+        "Flap Dash": "flap-dash",
+        "Temple Dash": "temple-dash",
+        "Grand Prix": "grand-prix",
+        "Skyway Sprint": "skyway-sprint",
+    }
+    score_game_label = st.selectbox("Choose a game", list(arcade_games), key="arcade_score_game")
+    arcade_period = st.selectbox(
+        "Leaderboard period",
+        ["All-time", "Last 7 days"],
+        key="arcade_leaderboard_period",
+    )
+    with st.form("arcade_score_form"):
+        submitted_score = st.number_input(
+            "Your best score (self-reported)",
+            min_value=0,
+            max_value=100000,
+            value=0,
+            step=1,
+        )
+        score_submitted = st.form_submit_button("Save my score")
+    if score_submitted:
+        if record_game_score(
+            st.session_state.user_id, arcade_games[score_game_label], int(submitted_score)
+        ):
+            record_activity(st.session_state.user_id, "play_arcade", 2)
+            st.toast("Score saved.")
+        else:
+            st.error("Could not save this score. Check the database connection.")
+    arcade_leaderboard = get_game_leaderboard(arcade_games[score_game_label], arcade_period)
+    if arcade_leaderboard is None:
+        st.info("Arcade scoreboards require a working Supabase connection.")
+    elif arcade_leaderboard.empty:
+        st.caption("No scores have been submitted for this game yet.")
+    else:
+        if not SUPABASE_AVAILABLE and not st.session_state.demo_mode:
+            st.caption("These scores are stored only in this browser session.")
+        arcade_display = arcade_leaderboard.rename(
+            columns={"user_id": "Player", "score": "Best score"}
+        )
+        arcade_display.index = arcade_display.index + 1
+        st.dataframe(arcade_display, width="stretch")
+
 # 3. MEME GALLERY
 with tab_memes:
-    st.markdown("### 🖼️ Meme Gallery")
+    st.markdown("### 🖼️ Meme gallery")
     community_meme_tab, template_tab = st.tabs(["🌐 User Uploads", "🧩 Meme Templates"])
 
     with community_meme_tab:
@@ -2011,7 +3623,7 @@ with tab_memes:
                     key="meme_image_upload",
                     max_upload_size=5,
                 )
-                meme_submitted = st.form_submit_button("Pin it to the wall 📌", use_container_width=True)
+                meme_submitted = st.form_submit_button("Pin it to the wall 📌", width="stretch")
             if meme_submitted:
                 if not meme_title.strip() or not meme_caption.strip() or meme_image is None:
                     st.warning("Add a title, a caption, and an image to post your meme.")
@@ -2029,15 +3641,21 @@ with tab_memes:
                             "image/webp": "webp",
                         }.get(meme_image.type, "png"),
                         "user_id": st.session_state.user_id,
+                        "_id": str(uuid.uuid4()),
                     }
                     if save_community_meme(meme):
+                        record_activity(st.session_state.user_id, "share_content", 5)
                         st.toast("Your meme is on the shared wall! 🎉")
                         st.rerun()
                     else:
                         st.session_state.community_memes.append(meme)
-                        st.warning("Supabase could not save this post. It is only visible in your session, not to everyone.")
+                        record_activity(st.session_state.user_id, "share_content", 5)
+                        if st.session_state.demo_mode:
+                            st.info("Demo post saved in this browser session only.")
+                        else:
+                            st.warning("Supabase could not save this post. It is only visible in your session, not to everyone.")
 
-        stored_memes = get_community_memes()
+        stored_memes = get_community_memes(include_hidden=st.session_state.admin_authenticated)
         if stored_memes is None:
             st.warning("The shared meme wall is unavailable right now. Session-only previews are marked below.")
             stored_memes = []
@@ -2049,14 +3667,24 @@ with tab_memes:
                 with cols[index % 2]:
                     st.markdown(f"#### {meme['title']}")
                     if meme.get("image"):
-                        st.image(meme["image"], use_container_width=True)
+                        st.image(meme["image"], width="stretch")
                     is_session_only = meme in st.session_state.community_memes
                     st.caption("Session-only preview" if is_session_only else "Shared community meme")
                     st.caption(meme["desc"])
+                    if not is_session_only:
+                        render_report_control(
+                            "meme", str(meme["_id"]), st.session_state.user_id, str(index)
+                        )
+                    if meme.get("_id") and (
+                        not is_session_only or st.session_state.demo_mode or not SUPABASE_AVAILABLE
+                    ):
+                        render_post_interactions(
+                            "meme", str(meme["_id"]), st.session_state.user_id
+                        )
         else:
             st.info("No community memes yet. Be the first to post one!")
 
-        if st.session_state.admin_authenticated:
+        if st.session_state.admin_authenticated and not st.session_state.demo_mode:
             st.divider()
             st.markdown("#### 🛠️ Manage uploaded memes")
             if stored_memes:
@@ -2068,6 +3696,7 @@ with tab_memes:
                     key="meme_admin_selection",
                 )
                 selected_meme = meme_lookup[selected_meme_id]
+                st.caption("Hidden from the community" if selected_meme["is_hidden"] else "Visible to the community")
                 with st.form(f"edit_meme_{selected_meme_id}"):
                     edited_meme_title = st.text_input("Meme title", value=selected_meme["title"])
                     edited_meme_desc = st.text_area("Meme caption", value=selected_meme["desc"])
@@ -2078,6 +3707,14 @@ with tab_memes:
                         st.rerun()
                     else:
                         st.error("Could not update this meme.")
+                if st.button(
+                    "Restore selected meme" if selected_meme["is_hidden"] else "Hide selected meme",
+                    key=f"toggle_meme_visibility_{selected_meme_id}",
+                ):
+                    if set_content_visibility("meme", selected_meme_id, not selected_meme["is_hidden"]):
+                        st.toast("Meme visibility updated.")
+                        st.rerun()
+                    st.error("Could not update this meme's visibility.")
                 if st.button("Delete selected meme", key=f"delete_meme_{selected_meme_id}"):
                     if delete_community_meme(selected_meme_id):
                         st.toast("Meme removed from the shared wall.")
@@ -2088,17 +3725,26 @@ with tab_memes:
                 st.info("There are no saved community memes to manage.")
 
     with template_tab:
-        st.caption("Browse the built-in meme prompts.")
+        st.markdown("#### 📖 Meme Dictionary")
+        st.caption("Hover over a meme card for its meaning, or use the same meme in your mood check-in.")
         cols = st.columns(2)
         for index, meme in enumerate(MEME_TEMPLATES):
             with cols[index % 2]:
                 st.markdown(f"#### {meme['title']}")
-                st.markdown(f"<div style='background:#ffe8b8;padding:24px;text-align:center;font-size:48px;border:2px solid #282522;border-radius:14px'>{meme['emoji']}</div>", unsafe_allow_html=True)
+                tooltip = html.escape(
+                    f"{meme['title']} — {meme['emotion']}",
+                    quote=True,
+                )
+                st.markdown(
+                    f"<div title='{tooltip}' style='background:#ffe8b8;padding:24px;text-align:center;font-size:48px;border:2px solid #282522;border-radius:14px'>{meme['emoji']}</div>",
+                    unsafe_allow_html=True,
+                )
                 st.caption(meme["desc"])
+                st.caption(f"💭 Emotion: {meme['emotion']}")
 
 # 4. JOKE FACTORY
 with tab_jokes:
-    st.markdown("### 😂 Joke Factory")
+    st.markdown("### 😂 Joke library")
     community_joke_tab, joke_library_tab = st.tabs(["🌐 User Uploads", "📚 Joke Library"])
 
     with community_joke_tab:
@@ -2110,7 +3756,7 @@ with tab_jokes:
             with st.form("joke_submit_form", clear_on_submit=True):
                 submitted_joke = st.text_area("Your one-liner", max_chars=300, placeholder="Why did the scarecrow win an award?...")
                 submitted_category = st.selectbox("Pick a shelf", ["Puns", "Tech", "Animals", "Work", "Science", "Food", "General"])
-                joke_submitted = st.form_submit_button("Send it to the laugh lab 🧪", use_container_width=True)
+                joke_submitted = st.form_submit_button("Send it to the laugh lab 🧪", width="stretch")
             if joke_submitted:
                 if submitted_joke.strip():
                     joke = {
@@ -2119,30 +3765,46 @@ with tab_jokes:
                         "user_id": st.session_state.user_id,
                     }
                     if save_community_joke(joke):
+                        record_activity(st.session_state.user_id, "share_content", 5)
                         st.toast("Joke added to the shared laugh lab! 😄")
                         st.rerun()
                     else:
+                        joke["_id"] = str(uuid.uuid4())
                         st.session_state.community_jokes.append(joke)
-                        st.warning("Supabase could not save this joke. It is only visible in your session, not to everyone.")
+                        record_activity(st.session_state.user_id, "share_content", 5)
+                        if st.session_state.demo_mode:
+                            st.info("Demo joke saved in this browser session only.")
+                        else:
+                            st.warning("Supabase could not save this joke. It is only visible in your session, not to everyone.")
                 else:
                     st.warning("Type a joke first. Even a terrible one counts.")
 
-        stored_jokes = get_community_jokes()
+        stored_jokes = get_community_jokes(include_hidden=st.session_state.admin_authenticated)
         if stored_jokes is None:
             st.warning("The shared joke list is unavailable right now. Session-only previews are marked below.")
             stored_jokes = []
         community_jokes = stored_jokes + st.session_state.community_jokes
         if community_jokes:
             st.markdown("#### Community jokes")
-            for joke in community_jokes:
+            for index, joke in enumerate(community_jokes):
                 session_only = joke in st.session_state.community_jokes
                 label = "Session-only preview · " if session_only else ""
                 with st.expander(f"{label}{joke['category']}: {joke['text'][:50]}..."):
                     st.markdown(joke["text"])
+                    if not session_only:
+                        render_report_control(
+                            "joke", str(joke["_id"]), st.session_state.user_id, str(index)
+                        )
+                    if joke.get("_id") and (
+                        not session_only or st.session_state.demo_mode or not SUPABASE_AVAILABLE
+                    ):
+                        render_post_interactions(
+                            "joke", str(joke["_id"]), st.session_state.user_id
+                        )
         else:
             st.info("No community jokes yet. Share the first one!")
 
-        if st.session_state.admin_authenticated:
+        if st.session_state.admin_authenticated and not st.session_state.demo_mode:
             st.divider()
             st.markdown("#### 🛠️ Manage uploaded jokes")
             if stored_jokes:
@@ -2154,6 +3816,7 @@ with tab_jokes:
                     key="joke_admin_selection",
                 )
                 selected_joke = joke_lookup[selected_joke_id]
+                st.caption("Hidden from the community" if selected_joke["is_hidden"] else "Visible to the community")
                 with st.form(f"edit_joke_{selected_joke_id}"):
                     edited_joke_category = st.selectbox(
                         "Joke category",
@@ -2168,6 +3831,14 @@ with tab_jokes:
                         st.rerun()
                     else:
                         st.error("Could not update this joke.")
+                if st.button(
+                    "Restore selected joke" if selected_joke["is_hidden"] else "Hide selected joke",
+                    key=f"toggle_joke_visibility_{selected_joke_id}",
+                ):
+                    if set_content_visibility("joke", selected_joke_id, not selected_joke["is_hidden"]):
+                        st.toast("Joke visibility updated.")
+                        st.rerun()
+                    st.error("Could not update this joke's visibility.")
                 if st.button("Delete selected joke", key=f"delete_joke_{selected_joke_id}"):
                     if delete_community_joke(selected_joke_id):
                         st.toast("Joke removed from the shared laugh lab.")
@@ -2176,6 +3847,8 @@ with tab_jokes:
                         st.error("Could not delete this joke.")
             else:
                 st.info("There are no saved community jokes to manage.")
+            st.divider()
+            render_moderation_queue()
 
     with joke_library_tab:
         st.caption("The original Giggle and Laugh joke collection.")
@@ -2197,3 +3870,95 @@ with tab_jokes:
         for joke in filtered_jokes:
             with st.expander(f"{joke['category']}: {joke['text'][:30]}..."):
                 st.markdown(joke["text"])
+
+with tab_chat:
+    render_community_chat()
+
+with tab_india_gk:
+    st.markdown("### 🇮🇳 India General Knowledge")
+    st.caption(
+        f"Explore {len(INDIA_GK_QUESTIONS)} questions about India's geography, history, "
+        "culture, science, sport, and civic life."
+    )
+    question_index = st.session_state.india_gk_index
+    question, answer = INDIA_GK_QUESTIONS[question_index]
+    st.caption(f"Question {question_index + 1} of {len(INDIA_GK_QUESTIONS)}")
+    st.markdown(f"#### {html.escape(question)}")
+    next_col, reveal_col = st.columns(2)
+    if next_col.button("🎲 Another question", key="next_india_gk", width="stretch"):
+        question_choices = [
+            index for index in range(len(INDIA_GK_QUESTIONS))
+            if index != question_index
+        ]
+        st.session_state.india_gk_index = random.choice(question_choices)
+        st.session_state.india_gk_answer_revealed = False
+        st.rerun()
+    if reveal_col.button(
+        "👀 Reveal answer",
+        key="reveal_india_gk",
+        width="stretch",
+        disabled=st.session_state.india_gk_answer_revealed,
+    ):
+        st.session_state.india_gk_answer_revealed = True
+        st.rerun()
+    if st.session_state.india_gk_answer_revealed:
+        st.success(f"Answer: {html.escape(answer)}")
+    st.caption("A learning activity, not a formal examination. Facts are best-effort curated.")
+
+
+@st.fragment(run_every="1s")
+def render_riddle():
+    st.markdown("### 🧩 Riddle corner")
+    st.caption(
+        f"There are {len(RIDDLES)} riddles. Think it through: the answer unlocks after "
+        "you have stayed with the current riddle for one full minute."
+    )
+    riddle, answer = RIDDLES[st.session_state.riddle_index]
+    started_at = st.session_state.riddle_started_at
+    elapsed_seconds = (
+        max(0, int(datetime.now().timestamp() - started_at))
+        if started_at is not None
+        else 0
+    )
+    remaining_seconds = max(0, 60 - elapsed_seconds)
+    st.caption(f"Riddle {st.session_state.riddle_index + 1} of {len(RIDDLES)}")
+    st.markdown(f"#### {html.escape(riddle)}")
+    st.progress(
+        min(elapsed_seconds / 60, 1.0),
+        text=(
+            "Start the timer when you're ready."
+            if started_at is None
+            else
+            "Answer unlocked!"
+            if remaining_seconds == 0
+            else f"Take your time · {remaining_seconds} seconds until the answer unlocks"
+        ),
+    )
+
+    if started_at is None and st.button(
+        "▶️ Start one-minute timer",
+        key="start_riddle_timer",
+        width="stretch",
+    ):
+        st.session_state.riddle_started_at = datetime.now().timestamp()
+        st.rerun()
+
+    if st.button(
+        "🔓 Show answer",
+        key="show_riddle_answer",
+        disabled=started_at is None or remaining_seconds > 0,
+        width="stretch",
+    ):
+        st.session_state.riddle_answer_revealed = True
+    if st.session_state.riddle_answer_revealed:
+        st.success(f"Answer: {html.escape(answer)}")
+
+    if st.button("➡️ Next riddle", key="next_riddle", width="stretch"):
+        st.session_state.riddle_index = (st.session_state.riddle_index + 1) % len(RIDDLES)
+        st.session_state.riddle_started_at = None
+        st.session_state.riddle_answer_revealed = False
+        st.rerun()
+
+
+with tab_riddles:
+    render_riddle()
